@@ -35,6 +35,12 @@ namespace Kudu.Console
                 }
             }
 
+            if (System.Environment.GetEnvironmentVariable(SettingsKeys.DisableDeploymentOnPush) == "1")
+            {
+                System.Console.Out.WriteLine(Resources.Log_NoDeploymentOnPush);
+                return 0;
+            }
+
             if (args.Length < 2)
             {
                 System.Console.WriteLine("Usage: kudu.exe appRoot wapTargets [deployer]");
@@ -69,7 +75,6 @@ namespace Kudu.Console
             string deploymentLockPath = Path.Combine(lockPath, Constants.DeploymentLockFile);
             string statusLockPath = Path.Combine(lockPath, Constants.StatusLockFile);
             string hooksLockPath = Path.Combine(lockPath, Constants.HooksLockFile);
-            string analyticsPath = env.AnalyticsPath;
 
             IOperationLock deploymentLock = new LockFile(deploymentLockPath, traceFactory);
             IOperationLock statusLock = new LockFile(statusLockPath, traceFactory);
@@ -80,7 +85,8 @@ namespace Kudu.Console
 
             IRepository gitRepository = new GitExeRepository(env, settingsManager, traceFactory);
 
-            IAnalytics analytics = new Analytics(settingsManager, tracer, analyticsPath);
+            IServerConfiguration serverConfiguration = new ServerConfiguration();
+            IAnalytics analytics = new Analytics(settingsManager, serverConfiguration, traceFactory);
 
             IWebHooksManager hooksManager = new WebHooksManager(tracer, env, hooksLock);
             var logger = new ConsoleLogger();
@@ -89,12 +95,12 @@ namespace Kudu.Console
                                                           traceFactory,
                                                           analytics,
                                                           settingsManager,
-                                                          new DeploymentStatusManager(env, statusLock),
+                                                          new DeploymentStatusManager(env, analytics, statusLock),
                                                           deploymentLock,
                                                           GetLogger(env, level, logger),
                                                           hooksManager);
 
-            var step = tracer.Step("Executing external process", new Dictionary<string, string>
+            var step = tracer.Step(XmlTracer.ExecutingExternalProcessTrace, new Dictionary<string, string>
             {
                 { "type", "process" },
                 { "path", "kudu.exe" },
@@ -131,9 +137,7 @@ namespace Kudu.Console
         {
             if (level > TraceLevel.Off)
             {
-                string traceLockPath = Path.Combine(env.TracePath, Constants.TraceLockFile);
-                var traceLock = new LockFile(traceLockPath, NullTracerFactory.Instance);
-                var tracer = new Tracer(Path.Combine(env.TracePath, Constants.TraceFile), level, traceLock);
+                var tracer = new XmlTracer(env.TracePath, level);
                 string logFile = System.Environment.GetEnvironmentVariable(Constants.TraceFileEnvKey);
                 if (!String.IsNullOrEmpty(logFile))
                 {

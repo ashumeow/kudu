@@ -215,13 +215,15 @@ namespace Kudu.Core.Jobs
             return null;
         }
 
-        public void InvokeTriggeredJob(string jobName)
+        public void InvokeTriggeredJob(string jobName, string arguments)
         {
             TriggeredJob triggeredJob = GetJob(jobName);
             if (triggeredJob == null)
             {
                 throw new JobNotFoundException();
             }
+
+            triggeredJob.CommandArguments = arguments;
 
             if (IsShuttingdown)
             {
@@ -233,7 +235,9 @@ namespace Kudu.Core.Jobs
                     jobName,
                     _ => new TriggeredJobRunner(triggeredJob.Name, Environment, Settings, TraceFactory, Analytics));
 
-            triggeredJobRunner.StartJobRun(triggeredJob, ReportTriggeredJobFinished);
+            JobSettings jobSettings = GetJobSettings(triggeredJob.Name);
+
+            triggeredJobRunner.StartJobRun(triggeredJob, jobSettings, ReportTriggeredJobFinished);
         }
 
         private async void ReportTriggeredJobFinished(string jobName, string jobRunId)

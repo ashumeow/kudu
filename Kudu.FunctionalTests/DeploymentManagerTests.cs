@@ -1,5 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.IO;
+using System.IO.Compression;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
@@ -49,6 +51,10 @@ namespace Kudu.FunctionalTests
 
                 ex = await ExceptionAssert.ThrowsAsync<HttpUnsuccessfulRequestException>(() => appManager.DeploymentManager.GetLogEntryDetailsAsync(id, "fakeId"));
                 Assert.Equal(HttpStatusCode.NotFound, ex.ResponseMessage.StatusCode);
+
+                ex = await ExceptionAssert.ThrowsAsync<HttpUnsuccessfulRequestException>(() => appManager.DeploymentManager.GetDeploymentScriptAsync());
+                Assert.Equal(HttpStatusCode.NotFound, ex.ResponseMessage.StatusCode);
+                Assert.Contains("Need to deploy website to get deployment script.", ex.ResponseMessage.ExceptionMessage);
             });
         }
 
@@ -131,6 +137,14 @@ namespace Kudu.FunctionalTests
                     Assert.True(nested.Count > 0);
 
                     KuduAssert.VerifyLogOutput(appManager, result.Id, "Cleaning Git repository");
+
+                    // Get deployment script
+                    var stream = await appManager.DeploymentManager.GetDeploymentScriptAsync();
+                    using (var zipFile = new ZipArchive(stream))
+                    {
+                        // Verify 2 files exist
+                        Assert.Equal(2, zipFile.Entries.Count);
+                    }
 
                     // Can't delete the active one
                     var ex = await ExceptionAssert.ThrowsAsync<HttpUnsuccessfulRequestException>(() => appManager.DeploymentManager.DeleteAsync(result.Id));
@@ -609,6 +623,29 @@ namespace Kudu.FunctionalTests
         }
 
         [Fact]
+        public async Task PullApiTestRepoCommitTextWithSpecialChar()
+        {
+            var payload = new JObject();
+            payload["url"] = "https://github.com/KuduApps/RepoCommitTextWithSpecialChar";
+            payload["format"] = "basic";
+            string appName = "RepoCommitTextWithSpecialChar";
+
+            await ApplicationManager.RunAsync(appName, async appManager =>
+            {
+                // Fetch master branch from first repo
+                await DeployPayloadHelperAsync(appManager, client => client.PostAsJsonAsync("deploy", payload));
+
+                var results = (await appManager.DeploymentManager.GetResultsAsync()).ToList();
+                Assert.Equal(1, results.Count);
+                Assert.Equal(DeployStatus.Success, results[0].Status);
+                Assert.Equal("GitHub", results[0].Deployer);
+                Assert.Equal("invalid char is ", results[0].Message);
+
+                KuduAssert.VerifyUrl(appManager.SiteUrl, "Hello World");
+            });
+        }
+
+        [Fact]
         public async Task PullApiTestSimpleFormatMultiBranchWithUpdates()
         {
             var payload = new JObject();
@@ -699,6 +736,71 @@ namespace Kudu.FunctionalTests
         }
 
         [Fact]
+        public async Task PullApiTestGitSimpleFormatWithSpecificCommitId()
+        {
+            await ApplicationManager.RunAsync("GitSimpleFormatWithBranch", async appManager =>
+            {
+                var gitUrl = "https://github.com/KuduApps/HelloKudu2.git";
+
+                await PostDeploymentAndVerifyUrl(appManager, gitUrl + "#58063e4", false, DeployStatus.Success, "<h1>Hello again Kudu</h1>");
+
+                await PostDeploymentAndVerifyUrl(appManager, gitUrl + "#2370e44", false, DeployStatus.Success, "<h1>Hello Kudu</h1>");
+
+                await PostDeploymentAndVerifyUrl(appManager, gitUrl, false, DeployStatus.Success, "<h1>Hello again Kudu</h1>");
+
+                var badRevision = Guid.NewGuid().ToString();
+                var error = await KuduAssert.ThrowsUnwrappedAsync<HttpUnsuccessfulRequestException>(() => PostDeploymentAndVerifyUrl(appManager, gitUrl + "#" + badRevision, false, DeployStatus.Failed));
+                Assert.Equal(HttpStatusCode.InternalServerError, error.ResponseMessage.StatusCode);
+                Assert.Contains("Invalid revision '" + badRevision + "'!", error.ResponseMessage.ExceptionMessage);
+            });
+        }
+
+        [Fact]
+        public async Task PullApiTestHgSimpleFormatWithSpecificCommitId()
+        {
+            await ApplicationManager.RunAsync("HgSimpleFormatWithBranch", async appManager =>
+            {
+                var hgUrl = "https://bitbucket.org/kudutest/hellomercurial";
+
+                await appManager.SettingsManager.SetValue("branch", "default");
+
+                await PostDeploymentAndVerifyUrl(appManager, hgUrl + "#e39d1ff", true, DeployStatus.Success, "Hello mercurial Commit 1", "/Hello.txt");
+
+                await PostDeploymentAndVerifyUrl(appManager, hgUrl + "#478b0d4", true, DeployStatus.Success, "Hello mercurial Commit 2", "/Hello.txt");
+                
+                await PostDeploymentAndVerifyUrl(appManager, hgUrl, true, DeployStatus.Success, "Hello mercurial!", "/Hello.txt");
+
+                var badRevision = Guid.NewGuid().ToString();
+                var error = await KuduAssert.ThrowsUnwrappedAsync<HttpUnsuccessfulRequestException>(() => PostDeploymentAndVerifyUrl(appManager, hgUrl + "#" + badRevision, true, DeployStatus.Failed));
+                Assert.Equal(HttpStatusCode.InternalServerError, error.ResponseMessage.StatusCode);
+                Assert.Contains("Invalid revision '" + badRevision + "'!", error.ResponseMessage.ExceptionMessage);
+            });
+        }
+
+        private async Task PostDeploymentAndVerifyUrl(ApplicationManager appManager, string url, bool isMercurial, DeployStatus status, string content = null, string path = null)
+        {
+            TestTracer.Trace("PostDeploymentAndVerifyUrl: {0}", url);
+
+            var payload = new JObject();
+            payload["url"] = url;
+            payload["format"] = "basic";
+            if (isMercurial)
+            {
+                payload["scm"] = "hg";
+            }
+
+            await DeployPayloadHelperAsync(appManager, client => client.PostAsJsonAsync("deploy", payload));
+            
+            var results = (await appManager.DeploymentManager.GetResultsAsync()).ToList();
+            Assert.True(results.Count > 0);
+            Assert.Equal(status, results[0].Status);
+            if (!String.IsNullOrEmpty(content))
+            {
+                KuduAssert.VerifyUrl(appManager.SiteUrl + path, content);
+            }
+        }
+
+        [Fact]
         public async Task PullApiTestRepoWithLongPath()
         {
             var payload = new JObject();
@@ -735,6 +837,128 @@ namespace Kudu.FunctionalTests
                     Assert.False(detail.Message.Contains("An unknown error has occurred"), "Must not contain unknow error!");
                 }
             });
+        }
+
+        [Fact]
+        public async Task PullApiTestAutoSwap()
+        {
+            string githubPayload =
+                @"{ ""after"": ""ea1c6d7ea669c816dd5f86206f7b47b228fdcacd"", ""before"": ""7e2a599e2d28665047ec347ab36731c905c95e8b"",  ""commits"": [ { ""added"": [], ""author"": { ""email"": ""prkrishn@hotmail.com"", ""name"": ""Pranav K"", ""username"": ""pranavkm"" }, ""id"": ""43acf30efa8339103e2bed5c6da1379614b00572"", ""message"": ""Changes from master again"", ""modified"": [ ""Hello.txt"" ], ""timestamp"": ""2012-12-17T17:32:15-08:00"" } ], ""compare"": ""https://github.com/KuduApps/GitHookTest/compare/7e2a599e2d28...7e2a599e2d28"", ""created"": false, ""deleted"": false, ""forced"": false, ""head_commit"": { ""added"": [ "".gitignore"", ""SimpleWebApplication.sln"", ""SimpleWebApplication/About.aspx"", ""SimpleWebApplication/About.aspx.cs"", ""SimpleWebApplication/About.aspx.designer.cs"", ""SimpleWebApplication/Account/ChangePassword.aspx"", ""SimpleWebApplication/Account/ChangePassword.aspx.cs"", ""SimpleWebApplication/Account/ChangePassword.aspx.designer.cs"", ""SimpleWebApplication/Account/ChangePasswordSuccess.aspx"", ""SimpleWebApplication/Account/ChangePasswordSuccess.aspx.cs"", ""SimpleWebApplication/Account/ChangePasswordSuccess.aspx.designer.cs"", ""SimpleWebApplication/Account/Login.aspx"", ""SimpleWebApplication/Account/Login.aspx.cs"", ""SimpleWebApplication/Account/Login.aspx.designer.cs"", ""SimpleWebApplication/Account/Register.aspx"", ""SimpleWebApplication/Account/Register.aspx.cs"", ""SimpleWebApplication/Account/Register.aspx.designer.cs"", ""SimpleWebApplication/Account/Web.config"", ""SimpleWebApplication/Default.aspx"", ""SimpleWebApplication/Default.aspx.cs"", ""SimpleWebApplication/Default.aspx.designer.cs"", ""SimpleWebApplication/Global.asax"", ""SimpleWebApplication/Global.asax.cs"", ""SimpleWebApplication/Properties/AssemblyInfo.cs"", ""SimpleWebApplication/Scripts/jquery-1.4.1-vsdoc.js"", ""SimpleWebApplication/Scripts/jquery-1.4.1.js"", ""SimpleWebApplication/Scripts/jquery-1.4.1.min.js"", ""SimpleWebApplication/SimpleWebApplication.csproj"", ""SimpleWebApplication/Site.Master"", ""SimpleWebApplication/Site.Master.cs"", ""SimpleWebApplication/Site.Master.designer.cs"", ""SimpleWebApplication/Styles/Site.css"", ""SimpleWebApplication/Web.Debug.config"", ""SimpleWebApplication/Web.Release.config"", ""SimpleWebApplication/Web.config"" ], ""author"": { ""email"": ""david.ebbo@microsoft.com"", ""name"": ""davidebbo"", ""username"": ""davidebbo"" }, ""committer"": { ""email"": ""david.ebbo@microsoft.com"", ""name"": ""davidebbo"", ""username"": ""davidebbo"" }, ""distinct"": false, ""id"": ""7e2a599e2d28665047ec347ab36731c905c95e8b"", ""message"": ""Initial"", ""modified"": [], ""removed"": [], ""timestamp"": ""2011-11-21T23:07:42-08:00"", ""url"": ""https://github.com/KuduApps/GitHookTest/commit/7e2a599e2d28665047ec347ab36731c905c95e8b"" }, ""pusher"": { ""name"": ""none"" }, ""ref"": ""refs/heads/foo/blah"", ""repository"": { ""created_at"": ""2012-06-28T00:07:55-07:00"", ""description"": """", ""fork"": false, ""forks"": 1, ""has_downloads"": true, ""has_issues"": true, ""has_wiki"": true, ""language"": ""ASP"", ""name"": ""GitHookTest"", ""open_issues"": 0, ""organization"": ""KuduApps"", ""owner"": { ""email"": ""kuduapps@hotmail.com"", ""name"": ""KuduApps"" }, ""private"": false, ""pushed_at"": ""2012-06-28T00:11:48-07:00"", ""size"": 188, ""url"": ""https://github.com/KuduApps/SimpleWebApplication"", ""watchers"": 1 } }";
+            string appName = "PullApiTestAutoSwap";
+
+            await ApplicationManager.RunAsync(appName, async appManager =>
+            {
+                await appManager.SettingsManager.SetValue("WEBSITE_SWAP_SLOTNAME", "someslot");
+
+                await appManager.SettingsManager.SetValue("branch", "foo/blah");
+
+                var post = new Dictionary<string, string>
+                {
+                    {"payload", githubPayload}
+                };
+
+                await DeployPayloadHelperAsync(appManager, async client =>
+                {
+                    client.DefaultRequestHeaders.Add("X-Github-Event", "push");
+                    var response = await client.PostAsync("deploy?scmType=GitHub", new FormUrlEncodedContent(post));
+
+                    AssertAutoSwapResponse(response, "someslot");
+
+                    return response;
+                });
+
+                var results = (await appManager.DeploymentManager.GetResultsAsync()).ToList();
+
+                Assert.Equal(1, results.Count);
+                Assert.Equal(DeployStatus.Success, results[0].Status);
+                Assert.Equal("GitHub", results[0].Deployer);
+                KuduAssert.VerifyUrl(appManager.SiteUrl, "Welcome to ASP.NET!");
+
+                TestTracer.Trace("Ensure second call fails due to lock file existing");
+                using (HttpClient client = CreateClient(appManager))
+                {
+                    client.DefaultRequestHeaders.Add("X-Github-Event", "push");
+                    var response = await client.PostAsync("deploy?scmType=GitHub", new FormUrlEncodedContent(post));
+                    Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+                }
+
+                appManager.VfsManager.Delete("site/locks/autoswap.lock");
+
+                TestTracer.Trace("After deleting the lock file the deployment should happen but since nothing changed auto swap will not happen");
+                await DeployPayloadHelperAsync(appManager, async client =>
+                {
+                    client.DefaultRequestHeaders.Add("X-Github-Event", "push");
+                    var response = await client.PostAsync("deploy?scmType=GitHub", new FormUrlEncodedContent(post));
+
+                    AssertAutoSwapResponse(response, "someslot");
+
+                    return response;
+                });
+            });
+        }
+
+        private static void AssertAutoSwapResponse(HttpResponseMessage response, string expectedSlotName)
+        {
+            IEnumerable<string> values;
+
+            response.Headers.TryGetValues("X-MS-SWAP-OPERATIONID", out values);
+            string operationId = values != null ? values.FirstOrDefault() : null;
+            TestTracer.Trace("Operation id is " + operationId);
+            Assert.False(String.IsNullOrEmpty(operationId));
+
+            response.Headers.TryGetValues("X-MS-SWAP-SLOTNAME", out values);
+            string slotName = values.FirstOrDefault();
+            Assert.Equal(expectedSlotName, slotName);
+
+            response.Headers.TryGetValues("X-MS-SWAP-DEPLOYMENTID", out values);
+            string deploymentId = values.FirstOrDefault();
+            TestTracer.Trace("Deployment id is " + deploymentId);
+            Assert.False(String.IsNullOrEmpty(deploymentId));
+        }
+
+        [Fact]
+        public async Task DeployAndAutoSwapWithDeployApi()
+        {
+            // Arrange
+
+            string appName = "DeployAndAutoSwapWithDeployApi";
+
+            using (var repo = Git.Clone("HelloWorld"))
+            {
+                await ApplicationManager.RunAsync(appName, async appManager =>
+                {
+                    string firstCommitId = Git.Id(repo.PhysicalPath);
+
+                    appManager.GitDeploy(repo.PhysicalPath);
+                    var results = await appManager.DeploymentManager.GetResultsAsync();
+                    Assert.Equal(DeployStatus.Success, results.First().Status);
+
+                    repo.WriteFile("HelloWorld.txt", "This is a test");
+                    Git.Commit(repo.PhysicalPath, "Another commit");
+
+                    appManager.GitDeploy(repo.PhysicalPath);
+                    results = await appManager.DeploymentManager.GetResultsAsync();
+                    Assert.True(results.All(r => r.Status == DeployStatus.Success));
+
+                    await appManager.SettingsManager.SetValue("WEBSITE_SWAP_SLOTNAME", "someotherslot");
+
+                    // Redeploy first deployment
+                    TestTracer.Trace("Deploy should auto swap");
+                    var response = await appManager.DeploymentManager.DeployAsync(firstCommitId);
+                    AssertAutoSwapResponse(response, "someotherslot");
+
+                    TestTracer.Trace("Second deploy should fail with conflict");
+                    response = await appManager.DeploymentManager.DeployWithoutEnsureSuccessfulAsync(firstCommitId);
+                    Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+
+                    TestTracer.Trace("Delete auto swap lock file");
+                    appManager.VfsManager.Delete("site/locks/autoswap.lock");
+
+                    TestTracer.Trace("Deployment should auto swap");
+                    response = await appManager.DeploymentManager.DeployAsync(firstCommitId);
+                    AssertAutoSwapResponse(response, "someotherslot");
+                });
+            }
         }
 
         [Theory]
@@ -831,7 +1055,7 @@ namespace Kudu.FunctionalTests
             yield return new RepoInvalidInfo("http://abcdefghigkl.com/", "abort: error: getaddrinfo failed.*hg.exe pull", "hg");
             yield return new RepoInvalidInfo("https://abcdefghigkl.com/", "Could.*n.*t resolve host.*abcdefghigkl.com", null);
             yield return new RepoInvalidInfo("https://abcdefghigkl.com/", "abort: error: getaddrinfo failed.*hg.exe pull", "hg");
-            yield return new RepoInvalidInfo("git@abcdefghigkl.com:Invalid/Invalid.git", "ssh: abcdefghigkl.com: no address associated with name", null);
+            yield return new RepoInvalidInfo("git@abcdefghigkl.com:Invalid/Invalid.git", "no address associated with name", null);
             yield return new RepoInvalidInfo("ssh://hg@abcdefghigkl.com/Invalid/Invalid.git", "abort: no suitable response from remote hg.*hg.exe pull", "hg");
             yield return new RepoInvalidInfo("git@github.com:Invalid/Invalid.git", "Permission denied [(]publickey[)]", null);
             yield return new RepoInvalidInfo("git@bitbucket.org:Invalid/Invalid.git", "Permission denied [(]publickey[)]", null);

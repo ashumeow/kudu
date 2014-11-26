@@ -48,13 +48,13 @@ namespace Kudu.Services
             }
         }
 
-        protected override Task OnDisconnected(IRequest request, string connectionId)
+        protected override Task OnDisconnected(IRequest request, string connectionId, bool stopCalled)
         {
             using (_tracer.Step("Client Disconected with connectionId = " + connectionId))
             {
                 KillProcess(connectionId, _tracer);
 
-                return base.OnDisconnected(request, connectionId);
+                return base.OnDisconnected(request, connectionId, stopCalled);
             }
         }
 
@@ -82,7 +82,8 @@ namespace Kudu.Services
                 }
                 else
                 {
-                    process.Process.StandardInput.WriteLine(data.Replace("\n", ""));
+                    //Both cmd.exe and powershell.exe are okay with either \r\n or \n for end-of-line.
+                    process.Process.StandardInput.Write(data);
                     process.Process.StandardInput.Flush();
                 }
                 process.LastInputTime = DateTime.UtcNow;

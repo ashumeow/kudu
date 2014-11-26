@@ -1,7 +1,7 @@
 ﻿using System;
-using System.Threading;
 using Kudu.Contracts.Tracing;
 using Kudu.Core;
+using Kudu.Core.Tracing;
 using Microsoft.AspNet.SignalR;
 using System.Collections.Concurrent;
 using System.IO;
@@ -46,14 +46,14 @@ namespace Kudu.Services.Editor
             }
         }
 
-        public override async Task OnDisconnected()
+        public override async Task OnDisconnected(bool stopCalled)
         {
             using (
                 _tracer.Step(String.Format("Client with connectionId {0} disconnected.",
                     Context.ConnectionId)))
             {
                 RemoveFileSystemWatcher(Context.ConnectionId, _tracer);
-                await base.OnDisconnected();
+                await base.OnDisconnected(stopCalled);
             }
         }
 

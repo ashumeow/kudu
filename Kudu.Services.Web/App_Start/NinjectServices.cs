@@ -38,13 +38,16 @@ using Kudu.Services.Web.Infrastructure;
 using Kudu.Services.Web.Services;
 using Kudu.Services.Web.Tracing;
 using Microsoft.AspNet.SignalR;
+using Microsoft.Owin;
 using Ninject;
 using Ninject.Activation;
 using Ninject.Web.Common;
+using Owin;
 using XmlSettings;
 
 [assembly: WebActivator.PreApplicationStartMethod(typeof(Kudu.Services.Web.App_Start.NinjectServices), "Start")]
 [assembly: WebActivator.ApplicationShutdownMethodAttribute(typeof(Kudu.Services.Web.App_Start.NinjectServices), "Stop")]
+[assembly: OwinStartup(typeof(Kudu.Services.Web.App_Start.NinjectServices.SignalRStartup))]
 
 namespace Kudu.Services.Web.App_Start
 {
@@ -118,6 +121,8 @@ namespace Kudu.Services.Web.App_Start
             // Make sure %HOME% is correctly set
             EnsureHomeEnvironmentVariable();
 
+            EnsureSiteBitnessEnvironmentVariable();
+
             IEnvironment environment = GetEnvironment();
 
             // Per request environment
@@ -160,15 +165,27 @@ namespace Kudu.Services.Web.App_Start
             kernel.Bind<IOperationLock>().ToConstant(hooksLock).WhenInjectedInto<WebHooksManager>();
             kernel.Bind<IOperationLock>().ToConstant(_deploymentLock);
 
-            kernel.Bind<IAnalytics>().ToMethod(context => new Analytics(context.Kernel.Get<IDeploymentSettingsManager>(),
-                                                                        context.Kernel.Get<ITracer>(),
-                                                                        environment.AnalyticsPath));
-
             var shutdownDetector = new ShutdownDetector();
             shutdownDetector.Initialize();
 
             IDeploymentSettingsManager noContextDeploymentsSettingsManager =
                 new DeploymentSettingsManager(new XmlSettings.Settings(GetSettingsPath(environment)));
+
+            var noContextTraceFactory = new TracerFactory(() => GetTracerWithoutContext(environment, noContextDeploymentsSettingsManager));
+
+            kernel.Bind<IAnalytics>().ToMethod(context => new Analytics(context.Kernel.Get<IDeploymentSettingsManager>(),
+                                                                        context.Kernel.Get<IServerConfiguration>(),
+                                                                        noContextTraceFactory));
+
+            // Trace unhandled (crash) exceptions.
+            AppDomain.CurrentDomain.UnhandledException += (sender, args) =>
+            {
+                var ex = args.ExceptionObject as Exception;
+                if (ex != null)
+                {
+                    kernel.Get<IAnalytics>().UnexpectedException(ex);
+                }
+            };
 
             // Trace shutdown event
             // Cannot use shutdownDetector.Token.Register because of race condition
@@ -206,8 +223,6 @@ namespace Kudu.Services.Web.App_Start
             kernel.Bind<IWebHooksManager>().To<WebHooksManager>()
                                              .InRequestScope();
 
-            var noContextTraceFactory = new TracerFactory(() => GetTracerWithoutContext(environment, noContextDeploymentsSettingsManager));
-
             ITriggeredJobsManager triggeredJobsManager = new TriggeredJobsManager(
                 noContextTraceFactory,
                 kernel.Get<IEnvironment>(),
@@ -222,6 +237,10 @@ namespace Kudu.Services.Web.App_Start
                 kernel.Get<IEnvironment>(),
                 kernel.Get<IDeploymentSettingsManager>(),
                 kernel.Get<IAnalytics>());
+
+            triggeredJobsManager.CleanupDeletedJobs();
+            continuousJobManager.CleanupDeletedJobs();
+
             kernel.Bind<IContinuousJobsManager>().ToConstant(continuousJobManager)
                                              .InTransientScope();
 
@@ -234,6 +253,8 @@ namespace Kudu.Services.Web.App_Start
                                                 .InRequestScope();
 
             kernel.Bind<IDeploymentManager>().To<DeploymentManager>()
+                                             .InRequestScope();
+            kernel.Bind<IAutoSwapHandler>().To<AutoSwapHandler>()
                                              .InRequestScope();
             kernel.Bind<ISSHKeyManager>().To<SSHKeyManager>()
                                              .InRequestScope();
@@ -279,12 +300,26 @@ namespace Kudu.Services.Web.App_Start
 
             MigrateSite(environment, noContextDeploymentsSettingsManager);
 
+            // Temporary fix for https://github.com/npm/npm/issues/5905
+            EnsureNpmGlobalDirectory();
+
             RegisterRoutes(kernel, RouteTable.Routes);
 
             // Register the default hubs route: ~/signalr
             GlobalHost.DependencyResolver = new SignalRNinjectDependencyResolver(kernel);
-            RouteTable.Routes.MapConnection<PersistentCommandController>("commandstream", "/commandstream");
-            RouteTable.Routes.MapHubs("/filesystemhub", new HubConfiguration());
+            GlobalConfiguration.Configuration.Filters.Add(
+                new TraceDeprecatedActionAttribute(
+                    kernel.Get<IAnalytics>(),
+                    kernel.Get<ITraceFactory>()));
+        }
+
+        public static class SignalRStartup
+        {
+            public static void Configuration(IAppBuilder app)
+            {
+                app.MapSignalR<PersistentCommandController>("/api/commandstream");
+                app.MapSignalR("/api/filesystemhub", new HubConfiguration());
+            }
         }
 
         public class SignalRNinjectDependencyResolver : DefaultDependencyResolver
@@ -311,7 +346,7 @@ namespace Kudu.Services.Web.App_Start
         {
             var configuration = kernel.Get<IServerConfiguration>();
             GlobalConfiguration.Configuration.Formatters.Clear();
-            GlobalConfiguration.Configuration.IncludeErrorDetailPolicy = IncludeErrorDetailPolicy.LocalOnly;
+            GlobalConfiguration.Configuration.IncludeErrorDetailPolicy = IncludeErrorDetailPolicy.Always;
 
             var jsonFormatter = new JsonMediaTypeFormatter();
             GlobalConfiguration.Configuration.Formatters.Add(jsonFormatter);
@@ -323,18 +358,18 @@ namespace Kudu.Services.Web.App_Start
             routes.MapHttpRoute("git-info-refs", configuration.GitServerRoot + "/info/refs", new { controller = "InfoRefs", action = "Execute" });
 
             // Push url
-            routes.MapHandler<ReceivePackHandler>(kernel, "git-receive-pack-root", "git-receive-pack");
-            routes.MapHandler<ReceivePackHandler>(kernel, "git-receive-pack", configuration.GitServerRoot + "/git-receive-pack");
+            routes.MapHandler<ReceivePackHandler>(kernel, "git-receive-pack-root", "git-receive-pack", deprecated: false);
+            routes.MapHandler<ReceivePackHandler>(kernel, "git-receive-pack", configuration.GitServerRoot + "/git-receive-pack", deprecated: false);
 
             // Fetch Hook
-            routes.MapHandler<FetchHandler>(kernel, "fetch", "deploy");
+            routes.MapHandler<FetchHandler>(kernel, "fetch", "deploy", deprecated: false);
 
             // Clone url
-            routes.MapHandler<UploadPackHandler>(kernel, "git-upload-pack-root", "git-upload-pack");
-            routes.MapHandler<UploadPackHandler>(kernel, "git-upload-pack", configuration.GitServerRoot + "/git-upload-pack");
+            routes.MapHandler<UploadPackHandler>(kernel, "git-upload-pack-root", "git-upload-pack", deprecated: false);
+            routes.MapHandler<UploadPackHandler>(kernel, "git-upload-pack", configuration.GitServerRoot + "/git-upload-pack", deprecated: false);
 
             // Custom GIT repositories, which can be served from any directory that has a git repo
-            routes.MapHandler<CustomGitRepositoryHandler>(kernel, "git-custom-repository", "git/{*path}");
+            routes.MapHandler<CustomGitRepositoryHandler>(kernel, "git-custom-repository", "git/{*path}", deprecated: false);
 
             // Scm (deployment repository)
             routes.MapHttpRouteDual("scm-info", "scm/info", new { controller = "LiveScm", action = "GetRepositoryInfo" });
@@ -366,6 +401,9 @@ namespace Kudu.Services.Web.App_Start
             routes.MapHttpRouteDual("one-deployment-log", "deployments/{id}/log", new { controller = "Deployment", action = "GetLogEntry" });
             routes.MapHttpRouteDual("one-deployment-log-details", "deployments/{id}/log/{logId}", new { controller = "Deployment", action = "GetLogEntryDetails" });
 
+            // Deployment script
+            routes.MapHttpRoute("get-deployment-script", "api/deploymentscript", new { controller = "Deployment", action = "GetDeploymentScript" }, new { verb = new HttpMethodConstraint("GET") });
+
             // SSHKey
             routes.MapHttpRouteDual("get-sshkey", "sshkey", new { controller = "SSHKey", action = "GetPublicKey" }, new { verb = new HttpMethodConstraint("GET") });
             routes.MapHttpRouteDual("put-sshkey", "sshkey", new { controller = "SSHKey", action = "SetPrivateKey" }, new { verb = new HttpMethodConstraint("PUT") });
@@ -376,7 +414,7 @@ namespace Kudu.Services.Web.App_Start
 
             // Settings
             routes.MapHttpRouteDual("set-setting", "settings", new { controller = "Settings", action = "Set" }, new { verb = new HttpMethodConstraint("POST") });
-            routes.MapHttpRoute("get-all-settings-old", "settings", new { controller = "Settings", action = "GetAll" }, new { verb = new HttpMethodConstraint("GET") });
+            routes.MapHttpRoute("get-all-settings-old", "settings", new { controller = "Settings", action = "GetAll" }, new { verb = new HttpMethodConstraint("GET") }, deprecated: true);
             routes.MapHttpRoute("get-all-settings", "api/settings", new { controller = "Settings", action = "GetAll", version = 2 }, new { verb = new HttpMethodConstraint("GET") });
             routes.MapHttpRouteDual("get-setting", "settings/{key}", new { controller = "Settings", action = "Get" }, new { verb = new HttpMethodConstraint("GET") });
             routes.MapHttpRouteDual("delete-setting", "settings/{key}", new { controller = "Settings", action = "Delete" }, new { verb = new HttpMethodConstraint("DELETE") });
@@ -393,18 +431,18 @@ namespace Kudu.Services.Web.App_Start
             routes.MapHttpRoute("recent-logs", "api/logs/recent", new { controller = "Diagnostics", action = "GetRecentLogs" }, new { verb = new HttpMethodConstraint("GET") });
 
             // Processes
-            routes.MapHttpRouteDual("all-processes", "diagnostics/processes", new { controller = "Process", action = "GetAllProcesses" }, new { verb = new HttpMethodConstraint("GET") });
-            routes.MapHttpRouteDual("one-process-get", "diagnostics/processes/{id}", new { controller = "Process", action = "GetProcess" }, new { verb = new HttpMethodConstraint("GET") });
-            routes.MapHttpRouteDual("one-process-delete", "diagnostics/processes/{id}", new { controller = "Process", action = "KillProcess" }, new { verb = new HttpMethodConstraint("DELETE") });
-            routes.MapHttpRouteDual("one-process-dump", "diagnostics/processes/{id}/dump", new { controller = "Process", action = "MiniDump" }, new { verb = new HttpMethodConstraint("GET") });
+            routes.MapHttpProcessesRoute("all-processes", "", new { controller = "Process", action = "GetAllProcesses" }, new { verb = new HttpMethodConstraint("GET") });
+            routes.MapHttpProcessesRoute("one-process-get", "/{id}", new { controller = "Process", action = "GetProcess" }, new { verb = new HttpMethodConstraint("GET") });
+            routes.MapHttpProcessesRoute("one-process-delete", "/{id}", new { controller = "Process", action = "KillProcess" }, new { verb = new HttpMethodConstraint("DELETE") });
+            routes.MapHttpProcessesRoute("one-process-dump", "/{id}/dump", new { controller = "Process", action = "MiniDump" }, new { verb = new HttpMethodConstraint("GET") });
             if (ProcessExtensions.SupportGCDump)
             {
-                routes.MapHttpRouteDual("one-process-gcdump", "diagnostics/processes/{id}/gcdump", new { controller = "Process", action = "GCDump" }, new { verb = new HttpMethodConstraint("GET") });
+                routes.MapHttpProcessesRoute("one-process-gcdump", "/{id}/gcdump", new { controller = "Process", action = "GCDump" }, new { verb = new HttpMethodConstraint("GET") });
             }
-            routes.MapHttpRouteDual("all-threads", "diagnostics/processes/{id}/threads", new { controller = "Process", action = "GetAllThreads" }, new { verb = new HttpMethodConstraint("GET") });
-            routes.MapHttpRouteDual("one-process-thread", "diagnostics/processes/{processId}/threads/{threadId}", new { controller = "Process", action = "GetThread" }, new { verb = new HttpMethodConstraint("GET") });
-            routes.MapHttpRouteDual("all-modules", "diagnostics/processes/{id}/modules", new { controller = "Process", action = "GetAllModules" }, new { verb = new HttpMethodConstraint("GET") });
-            routes.MapHttpRouteDual("one-process-module", "diagnostics/processes/{id}/modules/{baseAddress}", new { controller = "Process", action = "GetModule" }, new { verb = new HttpMethodConstraint("GET") });
+            routes.MapHttpProcessesRoute("all-threads", "/{id}/threads", new { controller = "Process", action = "GetAllThreads" }, new { verb = new HttpMethodConstraint("GET") });
+            routes.MapHttpProcessesRoute("one-process-thread", "/{processId}/threads/{threadId}", new { controller = "Process", action = "GetThread" }, new { verb = new HttpMethodConstraint("GET") });
+            routes.MapHttpProcessesRoute("all-modules", "/{id}/modules", new { controller = "Process", action = "GetAllModules" }, new { verb = new HttpMethodConstraint("GET") });
+            routes.MapHttpProcessesRoute("one-process-module", "/{id}/modules/{baseAddress}", new { controller = "Process", action = "GetModule" }, new { verb = new HttpMethodConstraint("GET") });
 
             // Runtime
             routes.MapHttpRouteDual("runtime", "diagnostics/runtime", new { controller = "Runtime", action = "GetRuntimeVersions" }, new { verb = new HttpMethodConstraint("GET") });
@@ -417,24 +455,24 @@ namespace Kudu.Services.Web.App_Start
             routes.MapHttpRouteDual("subscribe-hook", "hooks", new { controller = "WebHooks", action = "Subscribe" }, new { verb = new HttpMethodConstraint("POST") });
 
             // Jobs
-            routes.MapHttpRouteDual("list-all-jobs", "jobs", new { controller = "Jobs", action = "ListAllJobs" }, new { verb = new HttpMethodConstraint("GET") });
-            routes.MapHttpRouteDual("list-triggered-jobs", "jobs/triggered", new { controller = "Jobs", action = "ListTriggeredJobs" }, new { verb = new HttpMethodConstraint("GET") });
-            routes.MapHttpRouteDual("get-triggered-job", "jobs/triggered/{jobName}", new { controller = "Jobs", action = "GetTriggeredJob" }, new { verb = new HttpMethodConstraint("GET") });
-            routes.MapHttpRouteDual("invoke-triggered-job", "jobs/triggered/{jobName}/run", new { controller = "Jobs", action = "InvokeTriggeredJob" }, new { verb = new HttpMethodConstraint("POST") });
-            routes.MapHttpRouteDual("get-triggered-job-history", "jobs/triggered/{jobName}/history", new { controller = "Jobs", action = "GetTriggeredJobHistory" }, new { verb = new HttpMethodConstraint("GET") });
-            routes.MapHttpRouteDual("get-triggered-job-run", "jobs/triggered/{jobName}/history/{runId}", new { controller = "Jobs", action = "GetTriggeredJobRun" }, new { verb = new HttpMethodConstraint("GET") });
-            routes.MapHttpRouteDual("create-triggered-job", "jobs/triggered/{jobName}", new { controller = "Jobs", action = "CreateTriggeredJob" }, new { verb = new HttpMethodConstraint("PUT") });
-            routes.MapHttpRouteDual("remove-triggered-job", "jobs/triggered/{jobName}", new { controller = "Jobs", action = "RemoveTriggeredJob" }, new { verb = new HttpMethodConstraint("DELETE") });
-            routes.MapHttpRouteDual("get-triggered-job-settings", "jobs/triggered/{jobName}/settings", new { controller = "Jobs", action = "GetTriggeredJobSettings" }, new { verb = new HttpMethodConstraint("GET") });
-            routes.MapHttpRouteDual("set-triggered-job-settings", "jobs/triggered/{jobName}/settings", new { controller = "Jobs", action = "SetTriggeredJobSettings" }, new { verb = new HttpMethodConstraint("PUT") });
-            routes.MapHttpRouteDual("list-continuous-jobs", "jobs/continuous", new { controller = "Jobs", action = "ListContinuousJobs" }, new { verb = new HttpMethodConstraint("GET") });
-            routes.MapHttpRouteDual("get-continuous-job", "jobs/continuous/{jobName}", new { controller = "Jobs", action = "GetContinuousJob" }, new { verb = new HttpMethodConstraint("GET") });
-            routes.MapHttpRouteDual("disable-continuous-job", "jobs/continuous/{jobName}/stop", new { controller = "Jobs", action = "DisableContinuousJob" }, new { verb = new HttpMethodConstraint("POST") });
-            routes.MapHttpRouteDual("enable-continuous-job", "jobs/continuous/{jobName}/start", new { controller = "Jobs", action = "EnableContinuousJob" }, new { verb = new HttpMethodConstraint("POST") });
-            routes.MapHttpRouteDual("create-continuous-job", "jobs/continuous/{jobName}", new { controller = "Jobs", action = "CreateContinuousJob" }, new { verb = new HttpMethodConstraint("PUT") });
-            routes.MapHttpRouteDual("remove-continuous-job", "jobs/continuous/{jobName}", new { controller = "Jobs", action = "RemoveContinuousJob" }, new { verb = new HttpMethodConstraint("DELETE") });
-            routes.MapHttpRouteDual("get-continuous-job-settings", "jobs/continuous/{jobName}/settings", new { controller = "Jobs", action = "GetContinuousJobSettings" }, new { verb = new HttpMethodConstraint("GET") });
-            routes.MapHttpRouteDual("set-continuous-job-settings", "jobs/continuous/{jobName}/settings", new { controller = "Jobs", action = "SetContinuousJobSettings" }, new { verb = new HttpMethodConstraint("PUT") });
+            routes.MapHttpWebJobsRoute("list-all-jobs", "", "", new { controller = "Jobs", action = "ListAllJobs" }, new { verb = new HttpMethodConstraint("GET") });
+            routes.MapHttpWebJobsRoute("list-triggered-jobs", "triggered", "", new { controller = "Jobs", action = "ListTriggeredJobs" }, new { verb = new HttpMethodConstraint("GET") });
+            routes.MapHttpWebJobsRoute("get-triggered-job", "triggered", "/{jobName}", new { controller = "Jobs", action = "GetTriggeredJob" }, new { verb = new HttpMethodConstraint("GET") });
+            routes.MapHttpWebJobsRoute("invoke-triggered-job", "triggered", "/{jobName}/run", new { controller = "Jobs", action = "InvokeTriggeredJob" }, new { verb = new HttpMethodConstraint("POST") });
+            routes.MapHttpWebJobsRoute("get-triggered-job-history", "triggered", "/{jobName}/history", new { controller = "Jobs", action = "GetTriggeredJobHistory" }, new { verb = new HttpMethodConstraint("GET") });
+            routes.MapHttpWebJobsRoute("get-triggered-job-run", "triggered", "/{jobName}/history/{runId}", new { controller = "Jobs", action = "GetTriggeredJobRun" }, new { verb = new HttpMethodConstraint("GET") });
+            routes.MapHttpWebJobsRoute("create-triggered-job", "triggered", "/{jobName}", new { controller = "Jobs", action = "CreateTriggeredJob" }, new { verb = new HttpMethodConstraint("PUT") });
+            routes.MapHttpWebJobsRoute("remove-triggered-job", "triggered", "/{jobName}", new { controller = "Jobs", action = "RemoveTriggeredJob" }, new { verb = new HttpMethodConstraint("DELETE") });
+            routes.MapHttpWebJobsRoute("get-triggered-job-settings", "triggered", "/{jobName}/settings", new { controller = "Jobs", action = "GetTriggeredJobSettings" }, new { verb = new HttpMethodConstraint("GET") });
+            routes.MapHttpWebJobsRoute("set-triggered-job-settings", "triggered", "/{jobName}/settings", new { controller = "Jobs", action = "SetTriggeredJobSettings" }, new { verb = new HttpMethodConstraint("PUT") });
+            routes.MapHttpWebJobsRoute("list-continuous-jobs", "continuous", "", new { controller = "Jobs", action = "ListContinuousJobs" }, new { verb = new HttpMethodConstraint("GET") });
+            routes.MapHttpWebJobsRoute("get-continuous-job", "continuous", "/{jobName}", new { controller = "Jobs", action = "GetContinuousJob" }, new { verb = new HttpMethodConstraint("GET") });
+            routes.MapHttpWebJobsRoute("disable-continuous-job", "continuous", "/{jobName}/stop", new { controller = "Jobs", action = "DisableContinuousJob" }, new { verb = new HttpMethodConstraint("POST") });
+            routes.MapHttpWebJobsRoute("enable-continuous-job", "continuous", "/{jobName}/start", new { controller = "Jobs", action = "EnableContinuousJob" }, new { verb = new HttpMethodConstraint("POST") });
+            routes.MapHttpWebJobsRoute("create-continuous-job", "continuous", "/{jobName}", new { controller = "Jobs", action = "CreateContinuousJob" }, new { verb = new HttpMethodConstraint("PUT") });
+            routes.MapHttpWebJobsRoute("remove-continuous-job", "continuous", "/{jobName}", new { controller = "Jobs", action = "RemoveContinuousJob" }, new { verb = new HttpMethodConstraint("DELETE") });
+            routes.MapHttpWebJobsRoute("get-continuous-job-settings", "continuous", "/{jobName}/settings", new { controller = "Jobs", action = "GetContinuousJobSettings" }, new { verb = new HttpMethodConstraint("GET") });
+            routes.MapHttpWebJobsRoute("set-continuous-job-settings", "continuous", "/{jobName}/settings", new { controller = "Jobs", action = "SetContinuousJobSettings" }, new { verb = new HttpMethodConstraint("PUT") });
 
             // SiteExtensions
             routes.MapHttpRoute("api-get-remote-extensions", "api/extensionfeed", new { controller = "SiteExtension", action = "GetRemoteExtensions" }, new { verb = new HttpMethodConstraint("GET") });
@@ -443,6 +481,11 @@ namespace Kudu.Services.Web.App_Start
             routes.MapHttpRoute("api-get-local-extension", "api/siteextensions/{id}", new { controller = "SiteExtension", action = "GetLocalExtension" }, new { verb = new HttpMethodConstraint("GET") });
             routes.MapHttpRoute("api-uninstall-extension", "api/siteextensions/{id}", new { controller = "SiteExtension", action = "UninstallExtension" }, new { verb = new HttpMethodConstraint("DELETE") });
             routes.MapHttpRoute("api-install-update-extension", "api/siteextensions/{id}", new { controller = "SiteExtension", action = "InstallExtension" }, new { verb = new HttpMethodConstraint("PUT") });
+
+            // catch all unregistered url to properly handle not found
+            // this is to work arounf the issue in TraceModule where we see double OnBeginRequest call
+            // for the same request (404 and then 200 statusCode).
+            routes.MapHttpRoute("error-404", "{*path}", new { controller = "Error404", action = "Handle" });
         }
 
         // Perform migration tasks to deal with legacy sites that had different file layout
@@ -487,16 +530,26 @@ namespace Kudu.Services.Web.App_Start
             }
         }
 
+        private static void EnsureNpmGlobalDirectory()
+        {
+            try
+            {
+                string appData = System.Environment.GetEnvironmentVariable("APPDATA");
+                FileSystemHelpers.EnsureDirectory(Path.Combine(appData, "npm"));
+            }
+            catch
+            {
+                // no op
+            }
+        }
+
         private static ITracer GetTracer(IEnvironment environment, IKernel kernel)
         {
             TraceLevel level = kernel.Get<IDeploymentSettingsManager>().GetTraceLevel();
             if (level > TraceLevel.Off && TraceServices.CurrentRequestTraceFile != null)
             {
-                string tracePath = Path.Combine(environment.TracePath, Constants.TraceFile);
                 string textPath = Path.Combine(environment.TracePath, TraceServices.CurrentRequestTraceFile);
-                string traceLockPath = Path.Combine(environment.TracePath, Constants.TraceLockFile);
-                var traceLock = new LockFile(traceLockPath);
-                return new CascadeTracer(new Tracer(tracePath, level, traceLock), new TextTracer(textPath, level));
+                return new CascadeTracer(new XmlTracer(environment.TracePath, level), new TextTracer(textPath, level));
             }
 
             return NullTracer.Instance;
@@ -507,10 +560,7 @@ namespace Kudu.Services.Web.App_Start
             TraceLevel level = settings.GetTraceLevel();
             if (level > TraceLevel.Off)
             {
-                string tracePath = Path.Combine(environment.TracePath, Constants.TraceFile);
-                string traceLockPath = Path.Combine(environment.TracePath, Constants.TraceLockFile);
-                var traceLock = new LockFile(traceLockPath);
-                return new Tracer(tracePath, level, traceLock);
+                return new XmlTracer(environment.TracePath, level);
             }
 
             return NullTracer.Instance;
@@ -531,7 +581,7 @@ namespace Kudu.Services.Web.App_Start
 
             attribs.Add("lastrequesttime", TraceModule.LastRequestTime.ToString());
 
-            tracer.Trace("Process Shutdown", attribs);
+            tracer.Trace(XmlTracer.ProcessShutdownTrace, attribs);
         }
 
         private static ILogger GetLogger(IEnvironment environment, IKernel kernel)
@@ -581,6 +631,14 @@ namespace Kudu.Services.Web.App_Start
             {
                 path = Path.GetFullPath(path);
                 System.Environment.SetEnvironmentVariable("HOME", path);
+            }
+        }
+
+        private static void EnsureSiteBitnessEnvironmentVariable()
+        {
+            if (System.Environment.GetEnvironmentVariable("SITE_BITNESS") == null)
+            {
+                System.Environment.SetEnvironmentVariable("SITE_BITNESS", System.Environment.Is64BitProcess ? Constants.X64Bit : Constants.X86Bit);
             }
         }
 

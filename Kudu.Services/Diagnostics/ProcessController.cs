@@ -1,10 +1,10 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.IO;
-using System.IO.Abstractions;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
@@ -15,13 +15,14 @@ using Kudu.Contracts.Tracing;
 using Kudu.Core;
 using Kudu.Core.Diagnostics;
 using Kudu.Core.Infrastructure;
+using Kudu.Core.Tracing;
 using Kudu.Services.Infrastructure;
 
 namespace Kudu.Services.Performance
 {
     public class ProcessController : ApiController
     {
-        private const string FreeSitePolicy = "Shared|Limited";
+        private const string FreeSiteSku = "Free";
 
         private readonly ITracer _tracer;
         private readonly IEnvironment _environment;
@@ -110,11 +111,15 @@ namespace Kudu.Services.Performance
         }
 
         [HttpGet]
-        public HttpResponseMessage GetAllProcesses()
+        public HttpResponseMessage GetAllProcesses(bool allUsers = false)
         {
             using (_tracer.Step("ProcessController.GetAllProcesses"))
             {
-                var results = Process.GetProcesses().Select(p => GetProcessInfo(p, Request.RequestUri.AbsoluteUri.TrimEnd('/') + '/' + p.Id)).OrderBy(p => p.Name.ToLowerInvariant()).ToList();
+                var currentUser = Process.GetCurrentProcess().GetUserName();
+                var results = Process.GetProcesses()
+                    .Where(p => allUsers || String.Equals(currentUser, SafeGetValue(p.GetUserName, null), StringComparison.OrdinalIgnoreCase))
+                    .Select(p => GetProcessInfo(p, Request.RequestUri.GetLeftPart(UriPartial.Path).TrimEnd('/') + '/' + p.Id)).OrderBy(p => p.Name.ToLowerInvariant())
+                    .ToList();
                 return Request.CreateResponse(HttpStatusCode.OK, results);
             }
         }
@@ -151,11 +156,11 @@ namespace Kudu.Services.Performance
                         String.Format(CultureInfo.CurrentCulture, Resources.Error_DumpFormatNotSupported, dumpFormat));
                 }
 
-                string sitePolicy = _settings.GetWebSitePolicy();
-                if ((MINIDUMP_TYPE)dumpType == MINIDUMP_TYPE.WithFullMemory && sitePolicy.Equals(FreeSitePolicy, StringComparison.OrdinalIgnoreCase))
+                string siteSku = _settings.GetWebSiteSku();
+                if ((MINIDUMP_TYPE)dumpType == MINIDUMP_TYPE.WithFullMemory && siteSku.Equals(FreeSiteSku, StringComparison.OrdinalIgnoreCase))
                 {
                     return Request.CreateErrorResponse(HttpStatusCode.InternalServerError,
-                        String.Format(CultureInfo.CurrentCulture, Resources.Error_FullMiniDumpNotSupported, sitePolicy));
+                        String.Format(CultureInfo.CurrentCulture, Resources.Error_FullMiniDumpNotSupported, siteSku));
                 }
 
                 var process = GetProcessById(id);
@@ -418,7 +423,8 @@ namespace Kudu.Services.Performance
             {
                 Id = process.Id,
                 Name = process.ProcessName,
-                Href = selfLink
+                Href = selfLink,
+                UserName = SafeGetValue(process.GetUserName, null)
             };
 
             if (details)
@@ -431,7 +437,6 @@ namespace Kudu.Services.Performance
 
                 // always return empty
                 //info.Arguments = SafeGetValue(() => process.StartInfo.Arguments, "N/A");
-                //info.UserName = SafeGetValue(() => process.StartInfo.UserName, "N/A");
 
                 info.StartTime = SafeGetValue(() => process.StartTime.ToUniversalTime(), DateTime.MinValue);
                 info.TotalProcessorTime = SafeGetValue(() => process.TotalProcessorTime, TimeSpan.FromSeconds(-1));
@@ -458,6 +463,15 @@ namespace Kudu.Services.Performance
                 info.Children = SafeGetValue(() => process.GetChildren(_tracer, recursive: false), Enumerable.Empty<Process>()).Select(c => new Uri(selfLink, c.Id.ToString()));
                 info.Threads = SafeGetValue(() => GetThreads(process, selfLink.ToString()), Enumerable.Empty<ProcessThreadInfo>());
                 info.Modules = SafeGetValue(() => GetModules(process, selfLink.ToString().TrimEnd('/') + "/modules"), Enumerable.Empty<ProcessModuleInfo>());
+                info.TimeStamp = DateTime.UtcNow;
+                info.EnvironmentVariables = SafeGetValue(process.GetEnvironmentVariables, null);
+                info.CommandLine = SafeGetValue(process.GetCommandLine, null);
+                if (info.EnvironmentVariables != null)
+                {
+                    info.IsScmSite = SafeGetValue(() => ProcessExtensions.GetIsScmSite(info.EnvironmentVariables), false);
+                    info.IsWebJob = SafeGetValue(() => ProcessExtensions.GetIsWebJob(info.EnvironmentVariables), false);
+                    info.Description = SafeGetValue(() => ProcessExtensions.GetDescription(info.EnvironmentVariables), null);
+                }
             }
 
             return info;
@@ -483,7 +497,12 @@ namespace Kudu.Services.Performance
             }
             catch (Exception ex)
             {
-                _tracer.TraceError(ex);
+                // skip the known access denied to reduce noise in trace
+                var win32Exception = ex as Win32Exception;
+                if (win32Exception == null || win32Exception.NativeErrorCode != 5)
+                {
+                    _tracer.TraceError(ex);
+                }
             }
 
             return defaultValue;

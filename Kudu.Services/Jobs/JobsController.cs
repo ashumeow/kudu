@@ -12,6 +12,7 @@ using Kudu.Contracts.Jobs;
 using Kudu.Contracts.Tracing;
 using Kudu.Core.Hooks;
 using Kudu.Core.Jobs;
+using Kudu.Core.Tracing;
 
 namespace Kudu.Services.Jobs
 {
@@ -158,11 +159,11 @@ namespace Kudu.Services.Jobs
         }
 
         [HttpPost]
-        public HttpResponseMessage InvokeTriggeredJob(string jobName)
+        public HttpResponseMessage InvokeTriggeredJob(string jobName, string arguments = null)
         {
             try
             {
-                _triggeredJobsManager.InvokeTriggeredJob(jobName);
+                _triggeredJobsManager.InvokeTriggeredJob(jobName, arguments);
                 return Request.CreateResponse(HttpStatusCode.Accepted);
             }
             catch (JobNotFoundException)

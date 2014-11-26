@@ -2,7 +2,6 @@
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
-using System.IO.Abstractions;
 using System.Net;
 using System.Threading.Tasks;
 using System.Web;
@@ -14,6 +13,7 @@ using Kudu.Core;
 using Kudu.Core.Deployment;
 using Kudu.Core.Infrastructure;
 using Kudu.Core.SourceControl;
+using Kudu.Core.Tracing;
 using Kudu.Services.ServiceHookHandlers;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
@@ -29,6 +29,7 @@ namespace Kudu.Services
         private readonly IOperationLock _deploymentLock;
         private readonly ITracer _tracer;
         private readonly IRepositoryFactory _repositoryFactory;
+        private readonly IAutoSwapHandler _autoSwapHandler;
         private readonly string _markerFilePath;
 
         public FetchHandler(ITracer tracer,
@@ -38,7 +39,8 @@ namespace Kudu.Services
                             IOperationLock deploymentLock,
                             IEnvironment environment,
                             IEnumerable<IServiceHookHandler> serviceHookHandlers,
-                            IRepositoryFactory repositoryFactory)
+                            IRepositoryFactory repositoryFactory,
+                            IAutoSwapHandler autoSwapHandler)
         {
             _tracer = tracer;
             _deploymentLock = deploymentLock;
@@ -47,6 +49,7 @@ namespace Kudu.Services
             _status = status;
             _serviceHookHandlers = serviceHookHandlers;
             _repositoryFactory = repositoryFactory;
+            _autoSwapHandler = autoSwapHandler;
             _markerFilePath = Path.Combine(environment.DeploymentsPath, "pending");
 
             // Prefer marker creation in ctor to delay create when needed.
@@ -87,7 +90,7 @@ namespace Kudu.Services
 
                 DeploymentInfo deployInfo = null;
 
-                // We are going to assume that the branch details are already set by the time it gets here. This is particularly important in the mercurial case, 
+                // We are going to assume that the branch details are already set by the time it gets here. This is particularly important in the mercurial case,
                 // since Settings hardcodes the default value for Branch to be "master". Consequently, Kudu will NoOp requests for Mercurial commits.
                 string targetBranch = _settings.GetBranch();
                 try
@@ -124,7 +127,17 @@ namespace Kudu.Services
                 _tracer.Trace("Attempting to fetch target branch {0}", targetBranch);
                 bool acquired = await _deploymentLock.TryLockOperationAsync(async () =>
                 {
+                    if (_autoSwapHandler.IsAutoSwapOngoing())
+                    {
+                        context.Response.StatusCode = (int)HttpStatusCode.Conflict;
+                        context.Response.Write(Resources.Error_AutoSwapDeploymentOngoing);
+                        context.ApplicationInstance.CompleteRequest();
+                        return;
+                    }
+
                     await PerformDeployment(deployInfo);
+
+                    _autoSwapHandler.HandleAutoSwap(verifyActiveDeploymentIdChanged: false);
                 }, TimeSpan.Zero);
 
                 if (!acquired)
@@ -161,7 +174,7 @@ namespace Kudu.Services
                 {
                     // create temporary deployment before the actual deployment item started
                     // this allows portal ui to readily display on-going deployment (not having to wait for fetch to complete).
-                    // in addition, it captures any failure that may occur before the actual deployment item started 
+                    // in addition, it captures any failure that may occur before the actual deployment item started
                     ChangeSet tempChangeSet;
                     IDisposable tempDeployment = _deploymentManager.CreateTemporaryDeployment(
                                                     Resources.ReceivingChanges,
@@ -192,14 +205,25 @@ namespace Kudu.Services
                         // set to null as Deploy() below takes over logging
                         innerLogger = null;
 
+                        // The branch or commit id to deploy
+                        string deployBranch = !String.IsNullOrEmpty(deploymentInfo.CommitId) ? deploymentInfo.CommitId : targetBranch;
+
                         // In case the commit or perhaps fetch do no-op.
-                        if (deploymentInfo.TargetChangeset != null && ShouldDeploy(repository, deploymentInfo, targetBranch))
+                        if (deploymentInfo.TargetChangeset != null && ShouldDeploy(repository, deploymentInfo, deployBranch))
                         {
                             // Perform the actual deployment
-                            var changeSet = repository.GetChangeSet(targetBranch);
+                            var changeSet = repository.GetChangeSet(deployBranch);
+
+                            if (changeSet == null && !String.IsNullOrEmpty(deploymentInfo.CommitId))
+                            {
+                                throw new InvalidOperationException(String.Format("Invalid revision '{0}'!", deploymentInfo.CommitId));
+                            }
 
                             // Here, we don't need to update the working files, since we know Fetch left them in the correct state
-                            await _deploymentManager.DeployAsync(repository, changeSet, deploymentInfo.Deployer, clean: false, needFileUpdate: false);
+                            // unless for GenericHandler where specific commitId is specified
+                            bool deploySpecificCommitId = !String.IsNullOrEmpty(deploymentInfo.CommitId);
+
+                            await _deploymentManager.DeployAsync(repository, changeSet, deploymentInfo.Deployer, clean: false, needFileUpdate: deploySpecificCommitId);
                         }
                     }
                     catch (Exception ex)
@@ -228,7 +252,6 @@ namespace Kudu.Services
 
                 // check marker file and, if changed (meaning new /deploy request), redeploy.
                 nextMarkerFileUTC = FileSystemHelpers.GetLastWriteTimeUtc(_markerFilePath);
-
             } while (deploymentInfo.IsReusable && currentMarkerFileUTC != nextMarkerFileUTC);
         }
 
@@ -279,7 +302,7 @@ namespace Kudu.Services
 
                     if (result == DeployAction.ProcessDeployment)
                     {
-                        // Although a payload may be intended for a handler, it might not need to fetch. 
+                        // Although a payload may be intended for a handler, it might not need to fetch.
                         // For instance, if a different branch was pushed than the one the repository is deploying, we can no-op it.
                         Debug.Assert(info != null);
                         info.Handler = handler;

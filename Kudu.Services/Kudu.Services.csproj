@@ -17,8 +17,9 @@
     <NoWarn>1591</NoWarn>
   </PropertyGroup>
   <ItemGroup>
-    <Reference Include="Microsoft.AspNet.SignalR.Core">
-      <HintPath>..\packages\Microsoft.AspNet.SignalR.Core.1.1.3\lib\net40\Microsoft.AspNet.SignalR.Core.dll</HintPath>
+    <Reference Include="Microsoft.AspNet.SignalR.Core, Version=2.1.1.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35, processorArchitecture=MSIL">
+      <SpecificVersion>False</SpecificVersion>
+      <HintPath>..\packages\Microsoft.AspNet.SignalR.Core.2.1.1\lib\net45\Microsoft.AspNet.SignalR.Core.dll</HintPath>
     </Reference>
     <Reference Include="Microsoft.Web.Infrastructure, Version=1.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35, processorArchitecture=MSIL">
       <Private>True</Private>
@@ -90,6 +91,8 @@
     <Compile Include="Deployment\DeploymentController.cs" />
     <Compile Include="Diagnostics\LogStreamHandler.cs" />
     <Compile Include="Diagnostics\LogStreamManager.cs" />
+    <Compile Include="Error404Controller.cs" />
+    <Compile Include="Infrastructure\HttpResponseMessageExtensions.cs" />
     <Compile Include="Infrastructure\LowerCaseFormatterConfigAttribute.cs" />
     <Compile Include="Diagnostics\ProcessController.cs" />
     <Compile Include="Diagnostics\RuntimeController.cs" />
@@ -135,7 +138,6 @@
     <Compile Include="GitServer\InfoRefsController.cs" />
     <Compile Include="GitServer\ReceivePackHandler.cs" />
     <Compile Include="Infrastructure\AuthUtility.cs" />
-    <Compile Include="Infrastructure\IServerConfiguration.cs" />
     <Compile Include="Diagnostics\DiagnosticsController.cs" />
     <Compile Include="Infrastructure\LockExtensions.cs" />
     <Compile Include="Infrastructure\MemoryStreamExtensions.cs" />

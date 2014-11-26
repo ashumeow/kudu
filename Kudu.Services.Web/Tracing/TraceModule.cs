@@ -2,10 +2,13 @@
 using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Net;
+using System.Net.Http;
 using System.Threading;
 using System.Web;
 using Kudu.Contracts.Tracing;
 using Kudu.Core.Infrastructure;
+using Kudu.Core.Tracing;
 
 namespace Kudu.Services.Web.Tracing
 {
@@ -39,6 +42,17 @@ namespace Kudu.Services.Web.Tracing
 
             var httpContext = ((HttpApplication)sender).Context;
             var httpRequest = new HttpRequestWrapper(httpContext.Request);
+
+            // HACK: This is abusing the trace module
+            // Disallow GET requests from CSM extensions bridge
+            // Except if owner or coadmin (aka legacy or non-rbac) authorization
+            if (!String.IsNullOrEmpty(httpRequest.Headers["X-MS-VIA-EXTENSIONS-ROUTE"]) &&
+                httpRequest.HttpMethod.Equals(HttpMethod.Get.Method, StringComparison.OrdinalIgnoreCase) &&
+                !String.Equals(httpRequest.Headers["X-MS-CLIENT-AUTHORIZATION-SOURCE"], "legacy", StringComparison.OrdinalIgnoreCase))
+            {
+                httpContext.Response.StatusCode = (int)HttpStatusCode.Forbidden;
+                httpContext.Response.End();
+            }
 
             // HACK: If it's a Razor extension, add a dummy extension to prevent WebPages for blocking it,
             // as we need to serve those files via /vfs
@@ -81,7 +95,7 @@ namespace Kudu.Services.Web.Tracing
                 }
             }
 
-            httpContext.Items[_stepKey] = tracer.Step("Incoming Request", attribs);
+            httpContext.Items[_stepKey] = tracer.Step(XmlTracer.IncomingRequestTrace, attribs);
         }
 
         private static void OnEndRequest(object sender, EventArgs e)
@@ -119,7 +133,7 @@ namespace Kudu.Services.Web.Tracing
                 }
             }
 
-            tracer.Trace("Outgoing response", attribs);
+            tracer.Trace(XmlTracer.OutgoingResponseTrace, attribs);
 
             var requestStep = (IDisposable)httpContext.Items[_stepKey];
 
@@ -185,7 +199,7 @@ namespace Kudu.Services.Web.Tracing
                         }
                     }
 
-                    tracer.Trace("Startup Request", attribs);
+                    tracer.Trace(XmlTracer.StartupRequestTrace, attribs);
                 }
             }
 
@@ -198,8 +212,7 @@ namespace Kudu.Services.Web.Tracing
                 {
                     { "url", httpContext.Request.RawUrl },
                     { "method", httpContext.Request.HttpMethod },
-                    { "type", "request" },
-                    { "instance", InstanceIdUtility.GetShortInstanceId() }
+                    { "type", "request" }
                 };
 
             // Add an attribute containing the process, AppDomain and Thread ids to help debugging

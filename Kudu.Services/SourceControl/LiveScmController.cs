@@ -9,6 +9,7 @@ using Kudu.Core;
 using Kudu.Core.Deployment;
 using Kudu.Core.Infrastructure;
 using Kudu.Core.SourceControl;
+using Kudu.Core.Tracing;
 using Kudu.Services.Infrastructure;
 
 namespace Kudu.Services.SourceControl
@@ -79,6 +80,11 @@ namespace Kudu.Services.SourceControl
                     }
                 }
 
+                using (_tracer.Step("Delete auto swap lock file"))
+                {
+                    FileSystemHelpers.DeleteFileSafe(Path.Combine(_environment.LocksPath, AutoSwapHandler.AutoSwapLockFile));
+                }
+
                 using (_tracer.Step("Deleting ssh key"))
                 {
                     // Delete the ssh key
@@ -87,6 +93,9 @@ namespace Kudu.Services.SourceControl
 
                 if (deleteWebRoot != 0)
                 {
+                    // This logic is primarily used to help with site reuse during test.
+                    // The flag is not documented for general use.
+
                     using (_tracer.Step("Deleting web root"))
                     {
                         // Delete the wwwroot folder
@@ -98,6 +107,12 @@ namespace Kudu.Services.SourceControl
                         // Delete the diagnostic log. This is a slight abuse of deleteWebRoot, but the
                         // real semantic is more to reset the site to a fully clean state
                         FileSystemHelpers.DeleteDirectorySafe(_environment.DiagnosticsPath, ignoreErrors != 0);
+                    }
+
+                    using (_tracer.Step("Deleting ASP.NET 5 approot"))
+                    {
+                        // Delete the approot folder used by ASP.NET 5 apps
+                        FileSystemHelpers.DeleteDirectorySafe(Path.Combine(_environment.SiteRootPath, "approot"), ignoreErrors != 0);
                     }
 
                     // Delete first deployment manifest since it is no longer needed

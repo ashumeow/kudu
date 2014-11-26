@@ -133,6 +133,12 @@ namespace Kudu.Core.Infrastructure
             Instance.File.Copy(sourceFileName, destFileName, overwrite);
         }
 
+        public static void MoveFile(string sourceFileName, string destFileName)
+        {
+            FileSystemHelpers.DeleteFileSafe(destFileName);
+            Instance.File.Move(sourceFileName, destFileName);
+        }
+
         // From MSDN: http://msdn.microsoft.com/en-us/library/bb762914.aspx
         public static void CopyDirectoryRecursive(string sourceDirPath, string destinationDirPath, bool overwrite = true)
         {
@@ -199,7 +205,7 @@ namespace Kudu.Core.Infrastructure
             return Instance.Directory.GetFileSystemEntries(path);
         }
 
-        public static IEnumerable<string> GetDirectories(string path)
+        public static string[] GetDirectories(string path)
         {
             return Instance.Directory.GetDirectories(path);
         }
@@ -233,30 +239,20 @@ namespace Kudu.Core.Infrastructure
             Instance.File.Delete(path);
         }
 
-        public static bool DeleteFileSafe(string path)
+        public static void DeleteFileSafe(string path)
         {
-            try
-            {
-                if (FileExists(path))
-                {
-                    DeleteFile(path);
-                    return true;
-                }
-            }
-            catch (UnauthorizedAccessException) { }
-            catch (FileNotFoundException) { }
-
-            return false;
+            var info = Instance.FileInfo.FromFileName(path);
+            DeleteFileSystemInfo(info, ignoreErrors: true);
         }
 
         public static void DeleteDirectorySafe(string path, bool ignoreErrors = true)
         {
-            DeleteFileSystemInfo(new DirectoryInfoWrapper(new DirectoryInfo(path)), ignoreErrors);
+            DeleteFileSystemInfo(Instance.DirectoryInfo.FromDirectoryName(path), ignoreErrors);
         }
 
         public static void DeleteDirectoryContentsSafe(string path, bool ignoreErrors = true)
         {
-            DeleteDirectoryContentsSafe(new DirectoryInfoWrapper(new DirectoryInfo(path)), ignoreErrors);
+            DeleteDirectoryContentsSafe(Instance.DirectoryInfo.FromDirectoryName(path), ignoreErrors);
         }
 
         private static void DeleteDirectoryContentsSafe(DirectoryInfoBase directoryInfo, bool ignoreErrors)

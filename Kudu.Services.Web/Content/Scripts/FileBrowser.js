@@ -1,4 +1,4 @@
-﻿$.connection.hub.url = "/filesystemhub";
+﻿$.connection.hub.url = appRoot + "api/filesystemhub";
 var fileSystemHub = $.connection.fileSystemHub;
 fileSystemHub.client.fileExplorerChanged = function () {
     window.viewModel.selected().fetchChildren(true);
@@ -172,10 +172,20 @@ $.connection.hub.start().done(function () {
             var that = this;
             viewModel.editText("Fetching changes...");
             viewModel.fileEdit(this);
-            Vfs.getContent(this)
-               .done(function (data) {
-                   viewModel.editText(data);
-               }).fail(showError);
+            if(this.mime == "text/xml")
+            {
+                Vfs.getContent(this)
+                   .done(function (data) {
+                       viewModel.editText(vkbeautify.xml(data));
+                   }).fail(showError);
+            }
+            else
+            {
+                Vfs.getContent(this)
+                   .done(function (data) {
+                       viewModel.editText(data);
+                   }).fail(showError);
+            }
         }
 
         this.saveItem = function () {
@@ -191,8 +201,8 @@ $.connection.hub.start().done(function () {
         }
     }
 
-    var root = new node({ name: "/", type: "dir", href: "/vfs/" }),
-        ignoreWorkingDirChange = true,
+    var root = new node({ name: "/", type: "dir", href: appRoot + "api/vfs/" }),
+        ignoreWorkingDirChange = false,
         workingDirChanging = false,
         viewModel = {
             root: root,
@@ -231,6 +241,13 @@ $.connection.hub.start().done(function () {
             viewModel.errorText("");
         }
     });
+
+    viewModel.showSiteRoot = ko.computed(function () {
+        if ($.isEmptyObject(viewModel.specialDirsIndex())) {
+            return true;
+        }
+        return viewModel.specialDirsIndex()['LocalSiteRoot'] !== undefined;
+    }, viewModel);
 
     root.fetchChildren();
     ko.applyBindings(viewModel, document.getElementById("#main"));
@@ -500,7 +517,7 @@ $.connection.hub.start().done(function () {
         var items = evt.originalEvent.dataTransfer.items || evt.originalEvent.dataTransfer.files;
         if (items) {
             var filesArray = $.map(items, function(item) {
-                if (item.type === 'application/x-zip-compressed')
+                if (item.type === 'application/x-zip-compressed' || item.type === 'application/zip' || item.type === '')
                     return item;
             });
             if (filesArray && filesArray.length === items.length) {

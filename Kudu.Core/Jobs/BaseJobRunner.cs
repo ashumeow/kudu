@@ -5,11 +5,13 @@ using System.Configuration;
 using System.Diagnostics;
 using System.IO;
 using System.IO.Abstractions;
+using System.Linq;
 using System.Text;
 using System.Threading;
+using System.Xml.Linq;
+using System.Xml.XPath;
 using Kudu.Contracts.Jobs;
 using Kudu.Contracts.Settings;
-using Kudu.Contracts.Tracing;
 using Kudu.Core.Deployment;
 using Kudu.Core.Deployment.Generator;
 using Kudu.Core.Infrastructure;
@@ -24,6 +26,8 @@ namespace Kudu.Core.Jobs
         private readonly ExternalCommandFactory _externalCommandFactory;
         private readonly IAnalytics _analytics;
         private string _shutdownNotificationFilePath;
+        private string _workingDirectory;
+        private string _inPlaceWorkingDirectory;
 
         protected BaseJobRunner(string jobName, string jobsTypePath, IEnvironment environment,
             IDeploymentSettingsManager settings, ITraceFactory traceFactory, IAnalytics analytics)
@@ -55,13 +59,18 @@ namespace Kudu.Core.Jobs
 
         protected string JobDataPath { get; private set; }
 
-        protected string WorkingDirectory { get; private set; }
+        protected string WorkingDirectory
+        {
+            get { return _inPlaceWorkingDirectory ?? _workingDirectory; }
+        }
 
         protected abstract string JobEnvironmentKeyPrefix { get; }
 
         protected abstract TimeSpan IdleTimeout { get; }
 
         protected abstract void UpdateStatus(IJobLogger logger, string status);
+
+        protected JobSettings JobSettings { get; set; }
 
         private static int CalculateHashForJob(string jobBinariesPath)
         {
@@ -76,16 +85,36 @@ namespace Kudu.Core.Jobs
             return updateDatesString.ToString().GetHashCode();
         }
 
-        private void CacheJobBinaries(IJobLogger logger)
+        private void CacheJobBinaries(JobBase job, IJobLogger logger)
         {
+            bool isInPlaceDefault = job.ScriptHost.GetType() == typeof(NodeScriptHost);
+            if (JobSettings.GetIsInPlace(isInPlaceDefault))
+            {
+                _inPlaceWorkingDirectory = JobBinariesPath;
+                SafeKillAllRunningJobInstances(logger);
+                UpdateAppConfigs(WorkingDirectory);
+                return;
+            }
+
+            _inPlaceWorkingDirectory = null;
+
             if (WorkingDirectory != null)
             {
-                int currentHash = CalculateHashForJob(JobBinariesPath);
-                int lastHash = CalculateHashForJob(WorkingDirectory);
-
-                if (lastHash == currentHash)
+                try
                 {
-                    return;
+                    int currentHash = CalculateHashForJob(JobBinariesPath);
+                    int lastHash = CalculateHashForJob(WorkingDirectory);
+
+                    if (lastHash == currentHash)
+                    {
+                        return;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    // Log error and ignore it as it's not critical to cache job binaries
+                    logger.LogWarning("Failed to calculate hash for WebJob, continue to copy WebJob binaries (this will not affect WebJob run)\n" + ex);
+                    _analytics.UnexpectedException(ex);
                 }
             }
 
@@ -103,12 +132,15 @@ namespace Kudu.Core.Jobs
 
             try
             {
-                var tempJobInstancePath = Path.Combine(JobTempPath, Path.GetRandomFileName());
+                OperationManager.Attempt(() =>
+                {
+                    var tempJobInstancePath = Path.Combine(JobTempPath, Path.GetRandomFileName());
 
-                FileSystemHelpers.CopyDirectoryRecursive(JobBinariesPath, tempJobInstancePath);
-                UpdateAppConfigs(tempJobInstancePath);
+                    FileSystemHelpers.CopyDirectoryRecursive(JobBinariesPath, tempJobInstancePath);
+                    UpdateAppConfigs(tempJobInstancePath);
 
-                WorkingDirectory = tempJobInstancePath;
+                    _workingDirectory = tempJobInstancePath;
+                });
             }
             catch (Exception ex)
             {
@@ -118,7 +150,7 @@ namespace Kudu.Core.Jobs
                 _analytics.UnexpectedException(ex);
 
                 // job disabled
-                WorkingDirectory = null;
+                _workingDirectory = null;
             }
         }
 
@@ -141,7 +173,7 @@ namespace Kudu.Core.Jobs
                 throw new InvalidOperationException("Missing job script to run - {0}".FormatInvariant(job.ScriptFilePath));
             }
 
-            CacheJobBinaries(logger);
+            CacheJobBinaries(job, logger);
 
             if (WorkingDirectory == null)
             {
@@ -157,7 +189,7 @@ namespace Kudu.Core.Jobs
 
             logger.LogInformation("Run script '{0}' with script host - '{1}'".FormatCurrentCulture(scriptFileName, job.ScriptHost.GetType().Name));
 
-            using (var jobStartedReporter = new JobStartedReporter(_analytics, job, Settings.GetWebSitePolicy(), JobDataPath))
+            using (var jobStartedReporter = new JobStartedReporter(_analytics, job, Settings.GetWebSiteSku(), JobDataPath))
             {
                 try
                 {
@@ -172,7 +204,12 @@ namespace Kudu.Core.Jobs
                     exe.EnvironmentVariables[WellKnownEnvironmentVariables.WebJobsType] = job.JobType;
                     exe.EnvironmentVariables[WellKnownEnvironmentVariables.WebJobsDataPath] = JobDataPath;
                     exe.EnvironmentVariables[WellKnownEnvironmentVariables.WebJobsRunId] = runId;
-                    exe.EnvironmentVariables[WellKnownEnvironmentVariables.WebJobsShutdownNotificationFile] = _shutdownNotificationFilePath;
+                    exe.EnvironmentVariables[WellKnownEnvironmentVariables.WebJobsCommandArguments] = job.CommandArguments;
+
+                    if (_shutdownNotificationFilePath != null)
+                    {
+                        exe.EnvironmentVariables[WellKnownEnvironmentVariables.WebJobsShutdownNotificationFile] = _shutdownNotificationFilePath;
+                    }
 
                     UpdateStatus(logger, "Running");
 
@@ -182,7 +219,8 @@ namespace Kudu.Core.Jobs
                             logger.LogStandardOutput,
                             logger.LogStandardError,
                             job.ScriptHost.ArgumentsFormat,
-                            scriptFileName);
+                            scriptFileName,
+                            job.CommandArguments != null ? " " + job.CommandArguments : String.Empty);
 
                     if (exitCode != 0)
                     {
@@ -195,18 +233,15 @@ namespace Kudu.Core.Jobs
                         UpdateStatus(logger, "Success");
                     }
                 }
+                catch (ThreadAbortException)
+                {
+                    // We kill the process when refreshing the job
+                    logger.LogInformation("WebJob process was aborted");
+                    UpdateStatus(logger, "Stopped");
+                }
                 catch (Exception ex)
                 {
-                    if (ex is ThreadAbortException)
-                    {
-                        // We kill the process when refreshing the job
-                        logger.LogInformation("Job aborted");
-                        UpdateStatus(logger, "Aborted");
-                        return;
-                    }
-
                     logger.LogError(ex.ToString());
-
                     jobStartedReporter.Error = ex.Message;
                 }
             }
@@ -220,8 +255,8 @@ namespace Kudu.Core.Jobs
 
                 foreach (Process process in processes)
                 {
-                    StringDictionary processEnvironment;
-                    bool success = ProcessEnvironment.TryGetEnvironmentVariables(process, out processEnvironment);
+                    Dictionary<string, string> processEnvironment;
+                    bool success = process.TryGetEnvironmentVariables(out processEnvironment);
                     if (success && processEnvironment.ContainsKey(GetJobEnvironmentKey()))
                     {
                         try
@@ -250,20 +285,23 @@ namespace Kudu.Core.Jobs
             {
                 if (_shutdownNotificationFilePath != null)
                 {
-                    FileSystemHelpers.EnsureDirectory(Path.GetDirectoryName(_shutdownNotificationFilePath));
-                    OperationManager.Attempt(() => FileSystemHelpers.WriteAllText(_shutdownNotificationFilePath, DateTime.UtcNow.ToString()));
+                    OperationManager.Attempt(() =>
+                    {
+                        FileSystemHelpers.EnsureDirectory(Path.GetDirectoryName(_shutdownNotificationFilePath));
+                        FileSystemHelpers.WriteAllText(_shutdownNotificationFilePath, DateTime.UtcNow.ToString());
+                    });
                 }
             }
             catch (Exception ex)
             {
-                TraceFactory.GetTracer().TraceError(ex);
                 _analytics.UnexpectedException(ex);
             }
         }
 
-        private string RefreshShutdownNotificationFilePath(string jobName, string jobsTypePath)
+        protected virtual string RefreshShutdownNotificationFilePath(string jobName, string jobsTypePath)
         {
             string shutdownFilesDirectory = Path.Combine(Environment.TempPath, "JobsShutdown", jobsTypePath, jobName);
+            FileSystemHelpers.EnsureDirectory(shutdownFilesDirectory);
             FileSystemHelpers.DeleteDirectoryContentsSafe(shutdownFilesDirectory, ignoreErrors: true);
             return Path.Combine(shutdownFilesDirectory, Path.GetRandomFileName());
         }
@@ -275,7 +313,69 @@ namespace Kudu.Core.Jobs
             foreach (string configFilePath in configFilePaths)
             {
                 UpdateAppConfig(configFilePath);
+                UpdateAppConfigAddTraceListeners(configFilePath);
             }
+        }
+
+        /// <summary>
+        /// Updates the app.config using XML directly for injecting trace providers.
+        /// </summary>
+        private void UpdateAppConfigAddTraceListeners(string configFilePath)
+        {
+            try
+            {
+                var xmlConfig = XDocument.Load(configFilePath);
+
+                // Make sure the trace listeners section available otherwise create it
+                var configurationElement = GetOrCreateElement(xmlConfig, "configuration");
+                var systemDiagnosticsElement = GetOrCreateElement(configurationElement, "system.diagnostics");
+                var traceElement = GetOrCreateElement(systemDiagnosticsElement, "trace");
+                var listenersElement = GetOrCreateElement(traceElement, "listeners");
+
+                // Inject existing trace providers to the target app.config
+                foreach (TraceListener listener in Trace.Listeners)
+                {
+                    // Ignore the default trace provider
+                    if (String.Equals(listener.Name, "default", StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    // Do not add a trace provider if it already exists (by name)
+                    XElement listenerElement = listenersElement.Elements().FirstOrDefault(xElement =>
+                    {
+                        XAttribute nameAttribute = xElement.Attribute("name");
+                        return nameAttribute != null && String.Equals(nameAttribute.Value, listener.Name, StringComparison.OrdinalIgnoreCase);
+                    });
+
+                    if (listenerElement == null)
+                    {
+                        var addElement = new XElement("add");
+                        addElement.Add(new XAttribute("name", listener.Name));
+                        addElement.Add(new XAttribute("type", listener.GetType().AssemblyQualifiedName));
+                        listenersElement.AddFirst(addElement);
+                    }
+                }
+
+                FileSystemHelpers.WriteAllText(configFilePath, xmlConfig.ToString());
+            }
+            catch (Exception ex)
+            {
+                _analytics.UnexpectedException(ex);
+            }
+        }
+
+        private static XElement GetOrCreateElement(XContainer root, string name)
+        {
+            var element = root.XPathSelectElement(name);
+
+            if (element == null)
+            {
+                element = new XElement(name);
+                root.Add(element);
+            }
+
+            return element;
         }
 
         private void UpdateAppConfig(string configFilePath)
@@ -320,7 +420,6 @@ namespace Kudu.Core.Jobs
             }
             catch (Exception ex)
             {
-                TraceFactory.GetTracer().TraceError(ex);
                 _analytics.UnexpectedException(ex);
             }
         }

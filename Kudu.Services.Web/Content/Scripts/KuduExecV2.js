@@ -26,10 +26,10 @@ function LoadConsoleV2() {
         if (getShell().toUpperCase() === "POWERSHELL") {
             //PowerShell doesn't return a new line after CD, so let's add a new line in the UI 
             DisplayAndUpdate({ Error: "", Output: "\n" });
-            _sendCommand("cd \"" + value + "\"");
+            _sendCommand("cd \"" + value + "\"\n");
         } else {
             //CMD can't CD into different drives without /d and it's harmless for normal directories
-            _sendCommand("cd /d \"" + value + "\"");
+            _sendCommand("cd /d \"" + value + "\"\n");
         }
         //the change notification goes both ways (console <--> file explorer)
         //the console uses this flag to break the loop
@@ -37,10 +37,9 @@ function LoadConsoleV2() {
     };
 
     window.KuduExec.changeDir = _changeDir;
-    // call make console after this first command so the current working directory is set.
     var originalMatchString = undefined;
     var currentMatchIndex = -1;
-    var lastLine = "";
+    var lastLine;
     var lastUserInput = null;
     var kuduExecConsole = $('<div class="console">');
     var curReportFun;
@@ -71,11 +70,13 @@ function LoadConsoleV2() {
                 } else {
                     lastLine.Output = lastUserInput;
                 }
-                _sendCommand(line);
+                _sendCommand(lastUserInput);
                 controller.resetHistory();
                 DisplayAndUpdate(lastLine);
-                lastLine.Output = "";
-                lastLine.Error = "";
+                lastLine = {
+                    Output: "",
+                    Error: ""
+                };
                 DisplayAndUpdate(lastLine);
                 fileExplorerChanged = false;
                 if (line.trim().toUpperCase() == "EXIT") {
@@ -104,6 +105,9 @@ function LoadConsoleV2() {
             }
             if (result.length > 0) {
                 result = $.map(result, function (elm) {
+                    if (getShell().toUpperCase() === "POWERSHELL") {
+                        elm = ".\\" + elm;
+                    }
                     if (elm.indexOf(" ") !== -1) {
                         elm = '"' + elm + '"';
                     }
@@ -143,7 +147,7 @@ function LoadConsoleV2() {
         $("div.jquery-console-inner").css("background-color", "#012456");
     }
 
-    var connection = $.connection('/commandstream', "shell=" + getShell(), true);
+    var connection = $.connection(appRoot + 'api/commandstream', "shell=" + getShell(), true);
     window.$KuduExecConsole.data('connection', connection);
 
     connection.start({

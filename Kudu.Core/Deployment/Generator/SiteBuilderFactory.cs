@@ -8,6 +8,7 @@ using Kudu.Contracts.Settings;
 using Kudu.Contracts.Tracing;
 using Kudu.Core.Infrastructure;
 using Kudu.Core.SourceControl;
+using Kudu.Core.Tracing;
 
 namespace Kudu.Core.Deployment.Generator
 {
@@ -86,7 +87,7 @@ namespace Kudu.Core.Deployment.Generator
             // figure out with some heuristic, which one to deploy.
 
             // TODO: Pick only 1 and throw if there's more than one
-            VsSolutionProject project = solution.Projects.Where(p => p.IsWap || p.IsWebSite).FirstOrDefault();
+            VsSolutionProject project = solution.Projects.Where(p => p.IsWap || p.IsWebSite || p.IsAspNet5).FirstOrDefault();
 
             if (project == null)
             {
@@ -117,6 +118,15 @@ namespace Kudu.Core.Deployment.Generator
                                       solution.Path);
             }
 
+            if (project.IsAspNet5)
+            {
+                return new AspNet5Builder(_environment,
+                                      settings,
+                                      _propertyProvider,
+                                      repositoryRoot,
+                                      project.AbsolutePath);
+            }
+
             return new WebSiteBuilder(_environment,
                                       settings,
                                       _propertyProvider,
@@ -131,6 +141,10 @@ namespace Kudu.Core.Deployment.Generator
             {
                 return new NodeSiteBuilder(_environment, perDeploymentSettings, _propertyProvider, repositoryRoot, projectPath);
             }
+            else if (IsPythonSite(projectPath ?? repositoryRoot))
+            {
+                return new PythonSiteBuilder(_environment, perDeploymentSettings, _propertyProvider, repositoryRoot, projectPath);
+            }
 
             return new BasicBuilder(_environment, perDeploymentSettings, _propertyProvider, repositoryRoot, projectPath);
         }
@@ -138,6 +152,11 @@ namespace Kudu.Core.Deployment.Generator
         private static bool IsNodeSite(string projectPath)
         {
             return NodeSiteEnabler.LooksLikeNode(projectPath);
+        }
+
+        private static bool IsPythonSite(string projectPath)
+        {
+            return PythonSiteEnabler.LooksLikePython(projectPath);
         }
 
         private ISiteBuilder ResolveProject(string repositoryRoot, IDeploymentSettingsManager perDeploymentSettings, IFileFinder fileFinder, bool tryWebSiteProject = false, SearchOption searchOption = SearchOption.AllDirectories)
@@ -196,6 +215,17 @@ namespace Kudu.Core.Deployment.Generator
                 throw new InvalidOperationException(String.Format(CultureInfo.CurrentCulture,
                                                                   Resources.Error_ProjectDoesNotExist,
                                                                   targetPath));
+            }
+
+            // Check for ASP.NET 5 project without VS solution or project
+            string projectJson;
+            if (AspNet5Helper.TryAspNet5Project(targetPath, out projectJson))
+            {
+                return new AspNet5Builder(_environment,
+                                           perDeploymentSettings,
+                                           _propertyProvider,
+                                           repositoryRoot,
+                                           projectJson);
             }
 
             // If there's none then use the basic builder (the site is xcopy deployable)

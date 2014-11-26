@@ -18,9 +18,14 @@ namespace Kudu.Client.Diagnostics
         {
         }
 
-        public Task<IEnumerable<ProcessInfo>> GetProcessesAsync()
+        public Task<IEnumerable<ProcessInfo>> GetProcessesAsync(bool allUsers = false)
         {
-            return Client.GetJsonAsync<IEnumerable<ProcessInfo>>(String.Empty);
+            if (!allUsers)
+            {
+                return Client.GetJsonAsync<IEnumerable<ProcessInfo>>(String.Empty);
+            }
+
+            return Client.GetJsonAsync<IEnumerable<ProcessInfo>>("?allUsers=" + allUsers);
         }
 
         public Task<ProcessInfo> GetCurrentProcessAsync()
@@ -33,10 +38,20 @@ namespace Kudu.Client.Diagnostics
             return Client.GetJsonAsync<ProcessInfo>(id.ToString());
         }
 
-        public async Task KillProcessAsync(int id)
+        public async Task KillProcessAsync(int id, bool throwOnError = true)
         {
-            HttpResponseMessage response = await Client.DeleteAsync(id.ToString());
-            response.EnsureSuccessful().Dispose();
+            try
+            {
+                HttpResponseMessage response = await Client.DeleteAsync(id.ToString());
+                response.EnsureSuccessful().Dispose();
+            }
+            catch (Exception)
+            {
+                if (throwOnError)
+                {
+                    throw;
+                }
+            }
         }
 
         public async Task<Stream> MiniDump(int id = 0, int dumpType = 0, string format = null)

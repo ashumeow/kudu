@@ -97,21 +97,30 @@ namespace Kudu.Core.Infrastructure
 
         public bool Lock()
         {
+            Stream lockStream = null;
             try
             {
                 FileSystemHelpers.EnsureDirectory(Path.GetDirectoryName(_path));
 
-                _lockStream = FileSystemHelpers.OpenFile(_path, FileMode.Create, FileAccess.Write, FileShare.Read);
+                lockStream = FileSystemHelpers.OpenFile(_path, FileMode.Create, FileAccess.Write, FileShare.Read);
 
-                WriteLockInfo();
+                WriteLockInfo(lockStream);
 
                 OnLockAcquired();
+
+                _lockStream = lockStream;
+                lockStream = null;
 
                 return true;
             }
             catch (Exception ex)
             {
                 TraceIfUnknown(ex);
+
+                if (lockStream != null)
+                {
+                    lockStream.Close();
+                }
 
                 return false;
             }
@@ -124,15 +133,15 @@ namespace Kudu.Core.Infrastructure
 
         // we only write the lock info at lock's enter since
         // lock file will be cleaned up at release
-        private void WriteLockInfo()
+        private static void WriteLockInfo(Stream lockStream)
         {
             var strb = new StringBuilder();
             strb.Append(DateTime.UtcNow.ToString("s"));
             strb.AppendLine(System.Environment.StackTrace);
 
             var bytes = Encoding.UTF8.GetBytes(strb.ToString());
-            _lockStream.Write(bytes, 0, bytes.Length);
-            _lockStream.Flush();
+            lockStream.Write(bytes, 0, bytes.Length);
+            lockStream.Flush();
         }
 
         /// <summary>

@@ -13,8 +13,8 @@
       <SpecificVersion>False</SpecificVersion>
       <HintPath>..\packages\Mercurial.Net.1.1.1.607\lib\net35-Client\Mercurial.Net.dll</HintPath>
     </Reference>
-    <Reference Include="Microsoft.Web.XmlTransform">
-      <HintPath>..\packages\Microsoft.Web.Xdt.1.0.0\lib\net40\Microsoft.Web.XmlTransform.dll</HintPath>
+    <Reference Include="Microsoft.Diagnostics.Tracing.EventSource">
+      <HintPath>..\packages\Microsoft.Diagnostics.Tracing.EventSource.Redist.1.0.26\lib\net40\Microsoft.Diagnostics.Tracing.EventSource.dll</HintPath>
     </Reference>
     <Reference Include="Newtonsoft.Json, Version=4.5.0.0, Culture=neutral, PublicKeyToken=30ad4fe6b2a6aeed, processorArchitecture=MSIL">
       <SpecificVersion>False</SpecificVersion>
@@ -35,9 +35,6 @@
     <Reference Include="System.Net.Http" />
     <Reference Include="System.Net.Http.WebRequest" />
     <Reference Include="System.Xml.Linq" />
-    <Reference Include="System.Data.DataSetExtensions" />
-    <Reference Include="Microsoft.CSharp" />
-    <Reference Include="System.Data" />
     <Reference Include="System.Web" />
     <Reference Include="System.Xml" />
     <Reference Include="WindowsBase" />
@@ -52,11 +49,15 @@
     </Compile>
     <Compile Include="Commands\CommandExecutor.cs" />
     <Compile Include="Deployment\CascadeLogger.cs" />
+    <Compile Include="Deployment\AutoSwapHandler.cs" />
     <Compile Include="Deployment\DeploymentStatusFileExtensions.cs" />
     <Compile Include="Deployment\DeploymentStatusManager.cs" />
     <Compile Include="Deployment\Generator\DotNetConsoleBuilder.cs" />
     <Compile Include="Deployment\Generator\CustomGeneratorCommandSiteBuilder.cs" />
     <Compile Include="Deployment\Generator\ExternalCommandFactory.cs" />
+    <Compile Include="Deployment\Generator\PythonSiteEnabler.cs" />
+    <Compile Include="Deployment\Generator\PythonSiteBuilder.cs" />
+    <Compile Include="Deployment\Generator\AspNet5Builder.cs" />
     <Compile Include="Deployment\ProgressLogger.cs" />
     <Compile Include="Deployment\Generator\BasicBuilder.cs" />
     <Compile Include="Deployment\Generator\BaseBasicBuilder.cs" />
@@ -67,8 +68,10 @@
     <Compile Include="Deployment\Generator\NodeSiteEnabler.cs" />
     <Compile Include="Deployment\Generator\SiteBuilderFactory.cs" />
     <Compile Include="Hooks\WebHooksManager.cs" />
+    <Compile Include="Infrastructure\AspNet5Helper.cs" />
     <Compile Include="Infrastructure\InstanceIdUtility.cs" />
-    <Compile Include="Infrastructure\ProcessEnvironment.cs" />
+    <Compile Include="Infrastructure\IServerConfiguration.cs" />
+    <Compile Include="Infrastructure\ServerConfiguration.cs" />
     <Compile Include="Infrastructure\SettingsProcessor.cs" />
     <Compile Include="Infrastructure\ZipArchiveExtensions.cs" />
     <Compile Include="Jobs\ContinuousJobLogger.cs" />
@@ -95,7 +98,9 @@
     <Compile Include="Jobs\WebJobsStoppedException.cs" />
     <Compile Include="Jobs\WindowsScriptHost.cs" />
     <Compile Include="Settings\DiagnosticsSettingsManager.cs" />
+    <Compile Include="SiteExtensions\SemanticVersion.cs" />
     <Compile Include="SiteExtensions\SiteExtensionManager.cs" />
+    <Compile Include="Tracing\KuduEventSource.cs" />
     <Compile Include="Tracing\KuduSiteExtensionLogEvent.cs" />
     <Compile Include="Tracing\NullTracer.cs" />
     <Compile Include="Tracing\SiteExtensionLogEvent.cs" />
@@ -147,9 +152,10 @@
     <Compile Include="Tracing\TextLogger.cs" />
     <Compile Include="Tracing\NullTracerFactory.cs" />
     <Compile Include="Tracing\TextTracer.cs" />
-    <Compile Include="Tracing\Tracer.cs" />
+    <Compile Include="Tracing\TraceExtensions.cs" />
     <Compile Include="Tracing\TracerFactory.cs" />
     <Compile Include="Tracing\TraceStep.cs" />
+    <Compile Include="Tracing\XmlTracer.cs" />
     <Compile Include="Resources.Designer.cs">
       <AutoGen>True</AutoGen>
       <DesignTime>True</DesignTime>
@@ -180,9 +186,13 @@
     <Compile Include="SourceControl\Hg\HgRepository.cs" />
   </ItemGroup>
   <ItemGroup>
+    <Content Include="Scripts\select_python_version.py">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
     <Content Include="Scripts\starter.cmd">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </Content>
+    <EmbeddedResource Include="SiteExtensions\applicationHost.xdt.xml" />
     <None Include="packages.config" />
     <Content Include="Scripts\kudusync.cmd">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
@@ -214,6 +224,9 @@
     <Content Include="Scripts\semver.js">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </Content>
+    <None Include="Scripts\kvm.ps1">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\Kudu.Contracts\Kudu.Contracts.csproj">
@@ -232,6 +245,13 @@
   <Target Name="BeforeBuild">
     <!-- Ensure NuGet.exe exists in the Build directory prior to building this project. -->
     <MSBuild Projects="..\Build\NuGet.targets" Targets="CheckPrerequisites" />
+  </Target>
+  <Import Project="..\packages\Microsoft.Diagnostics.Tracing.EventRegister.1.0.26\build\Microsoft.Diagnostics.Tracing.EventRegister.targets" Condition="Exists('..\packages\Microsoft.Diagnostics.Tracing.EventRegister.1.0.26\build\Microsoft.Diagnostics.Tracing.EventRegister.targets')" />
+  <Target Name="EnsureNuGetPackageBuildImports" BeforeTargets="PrepareForBuild">
+    <PropertyGroup>
+      <ErrorText>This project references NuGet package(s) that are missing on this computer. Enable NuGet Package Restore to download them.  For more information, see http://go.microsoft.com/fwlink/?LinkID=322105. The missing file is {0}.</ErrorText>
+    </PropertyGroup>
+    <Error Condition="!Exists('..\packages\Microsoft.Diagnostics.Tracing.EventRegister.1.0.26\build\Microsoft.Diagnostics.Tracing.EventRegister.targets')" Text="$([System.String]::Format('$(ErrorText)', '..\packages\Microsoft.Diagnostics.Tracing.EventRegister.1.0.26\build\Microsoft.Diagnostics.Tracing.EventRegister.targets'))" />
   </Target>
   <!-- To modify your build process, add your task inside one of the targets below and uncomment it. 
        Other similar extension points exist, see Microsoft.Common.targets.

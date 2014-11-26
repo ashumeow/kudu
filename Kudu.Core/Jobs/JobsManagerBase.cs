@@ -48,9 +48,7 @@ namespace Kudu.Core.Jobs
 
         private readonly string _jobsTypePath;
 
-        private string _appBaseUrlPrefix;
-        private string _urlPrefix;
-        private string _vfsUrlPrefix;
+        private string _lastKnownAppBaseUrlPrefix;
 
         protected IEnvironment Environment { get; private set; }
 
@@ -145,6 +143,24 @@ namespace Kudu.Core.Jobs
             }, retries: 3, delayBeforeRetry: 2000);
         }
 
+        public void CleanupDeletedJobs()
+        {
+            IEnumerable<TJob> jobs = ListJobs();
+            IEnumerable<string> jobNames = jobs.Select(j => j.Name);
+            DirectoryInfoBase jobsDataDirectory = FileSystemHelpers.DirectoryInfoFromDirectoryName(JobsDataPath);
+            if (jobsDataDirectory.Exists)
+            {
+                DirectoryInfoBase[] jobDataDirectories = jobsDataDirectory.GetDirectories("*", SearchOption.TopDirectoryOnly);
+                IEnumerable<string> allJobDataDirectories = jobDataDirectories.Select(j => j.Name);
+                IEnumerable<string> directoriesToRemove = allJobDataDirectories.Except(jobNames, StringComparer.OrdinalIgnoreCase);
+                foreach (string directoryToRemove in directoriesToRemove)
+                {
+                    TraceFactory.GetTracer().Trace("Removed job data path as the job was already deleted: " + directoryToRemove);
+                    FileSystemHelpers.DeleteDirectorySafe(Path.Combine(JobsDataPath, directoryToRemove));
+                }
+            }
+        }
+
         private string GetSpecificJobDataPath(string jobName)
         {
             return Path.Combine(JobsDataPath, jobName);
@@ -181,20 +197,59 @@ namespace Kudu.Core.Jobs
 
         protected TJob BuildJob(DirectoryInfoBase jobDirectory, bool nullJobOnError = true)
         {
-            if (!jobDirectory.Exists)
+            try
             {
-                return null;
+                if (!jobDirectory.Exists)
+                {
+                    return null;
+                }
+
+                DirectoryInfoBase jobScriptDirectory = GetJobScriptDirectory(jobDirectory);
+
+                string jobName = jobDirectory.Name;
+                FileInfoBase[] files = jobScriptDirectory.GetFiles("*.*", SearchOption.TopDirectoryOnly);
+                IScriptHost scriptHost;
+                string scriptFilePath = FindCommandToRun(files, out scriptHost);
+
+                if (scriptFilePath == null)
+                {
+                    // Return a job representing an error for no runnable script file found for job
+                    if (nullJobOnError)
+                    {
+                        return null;
+                    }
+
+                    return new TJob
+                    {
+                        Name = jobName,
+                        JobType = _jobsTypePath,
+                        Error = Resources.Error_NoRunnableScriptForJob,
+                    };
+                }
+
+                string runCommand = scriptFilePath.Substring(jobDirectory.FullName.Length + 1);
+
+                var job = new TJob
+                {
+                    Name = jobName,
+                    Url = BuildJobsUrl(jobName),
+                    ExtraInfoUrl = BuildExtraInfoUrl(jobName),
+                    ScriptFilePath = scriptFilePath,
+                    RunCommand = runCommand,
+                    JobType = _jobsTypePath,
+                    ScriptHost = scriptHost,
+                    UsingSdk = IsUsingSdk(GetSpecificJobDataPath(jobName)),
+                    JobBinariesRootPath = jobScriptDirectory.FullName
+                };
+
+                UpdateJob(job);
+
+                return job;
             }
-
-            DirectoryInfoBase jobScriptDirectory = GetJobScriptDirectory(jobDirectory);
-
-            string jobName = jobDirectory.Name;
-            FileInfoBase[] files = jobScriptDirectory.GetFiles("*.*", SearchOption.TopDirectoryOnly);
-            IScriptHost scriptHost;
-            string scriptFilePath = FindCommandToRun(files, out scriptHost);
-
-            if (scriptFilePath == null)
+            catch (Exception ex)
             {
+                Analytics.UnexpectedException(ex);
+
                 // Return a job representing an error for no runnable script file found for job
                 if (nullJobOnError)
                 {
@@ -203,30 +258,10 @@ namespace Kudu.Core.Jobs
 
                 return new TJob
                 {
-                    Name = jobName,
                     JobType = _jobsTypePath,
-                    Error = Resources.Error_NoRunnableScriptForJob,
+                    Error = ex.Message,
                 };
             }
-
-            string runCommand = scriptFilePath.Substring(jobDirectory.FullName.Length + 1);
-
-            var job = new TJob
-            {
-                Name = jobName,
-                Url = BuildJobsUrl(jobName),
-                ExtraInfoUrl = BuildExtraInfoUrl(jobName),
-                ScriptFilePath = scriptFilePath,
-                RunCommand = runCommand,
-                JobType = _jobsTypePath,
-                ScriptHost = scriptHost,
-                UsingSdk = IsUsingSdk(GetSpecificJobDataPath(jobName)),
-                JobBinariesRootPath = jobScriptDirectory.FullName
-            };
-
-            UpdateJob(job);
-
-            return job;
         }
 
         public JobSettings GetJobSettings(string jobName)
@@ -297,32 +332,22 @@ namespace Kudu.Core.Jobs
 
         protected Uri BuildJobsUrl(string relativeUrl)
         {
-            if (_urlPrefix == null)
+            if (AppBaseUrlPrefix == null)
             {
-                if (AppBaseUrlPrefix == null)
-                {
-                    return null;
-                }
-
-                _urlPrefix = "{0}/jobs/{1}/".FormatInvariant(AppBaseUrlPrefix, _jobsTypePath);
+                return null;
             }
 
-            return new Uri(_urlPrefix + relativeUrl);
+            return new Uri("{0}/api/{1}webjobs/{2}".FormatInvariant(AppBaseUrlPrefix, _jobsTypePath, relativeUrl));
         }
 
         protected Uri BuildVfsUrl(string relativeUrl)
         {
-            if (_vfsUrlPrefix == null)
+            if (AppBaseUrlPrefix == null)
             {
-                if (AppBaseUrlPrefix == null)
-                {
-                    return null;
-                }
-
-                _vfsUrlPrefix = "{0}/vfs/data/jobs/{1}/".FormatInvariant(AppBaseUrlPrefix, _jobsTypePath);
+                return null;
             }
 
-            return new Uri(_vfsUrlPrefix + relativeUrl);
+            return new Uri("{0}/vfs/data/jobs/{1}/{2}".FormatInvariant(AppBaseUrlPrefix, _jobsTypePath, relativeUrl));
         }
 
         private Uri BuildExtraInfoUrl(string jobName)
@@ -339,17 +364,13 @@ namespace Kudu.Core.Jobs
         {
             get
             {
-                if (_appBaseUrlPrefix == null)
+                if (HttpContext.Current == null)
                 {
-                    if (HttpContext.Current == null)
-                    {
-                        return null;
-                    }
-
-                    _appBaseUrlPrefix = HttpContext.Current.Request.Url.GetLeftPart(UriPartial.Authority);
+                    return _lastKnownAppBaseUrlPrefix;
                 }
 
-                return _appBaseUrlPrefix;
+                _lastKnownAppBaseUrlPrefix = HttpContext.Current.Request.Url.GetLeftPart(UriPartial.Authority);
+                return _lastKnownAppBaseUrlPrefix;
             }
         }
 

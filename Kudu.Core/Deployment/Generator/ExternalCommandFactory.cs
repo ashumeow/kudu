@@ -35,8 +35,13 @@ namespace Kudu.Core.Deployment.Generator
             UpdateToDefaultIfNotSet(exe, WellKnownEnvironmentVariables.PostDeploymentActionsCommandKey, PostDeploymentActionsCommand, logger);
             UpdateToDefaultIfNotSet(exe, WellKnownEnvironmentVariables.PostDeploymentActionsDirectoryKey, PostDeploymentActionsDir, logger);
             UpdateToDefaultIfNotSet(exe, WellKnownEnvironmentVariables.SelectNodeVersionCommandKey, SelectNodeVersionCommand, logger);
+            UpdateToDefaultIfNotSet(exe, WellKnownEnvironmentVariables.SelectPythonVersionCommandKey, SelectPythonVersionCommand, logger);
             UpdateToDefaultIfNotSet(exe, WellKnownEnvironmentVariables.WebJobsDeployCommandKey, WebJobsDeployCommand, logger);
-            UpdateToDefaultIfNotSet(exe, WellKnownEnvironmentVariables.WebJobsDeployCommandKeyOld, WebJobsDeployCommand, logger);
+            UpdateToDefaultIfNotSet(exe, WellKnownEnvironmentVariables.KreVersion, Constants.KreDefaultVersion, logger);
+            UpdateToDefaultIfNotSet(exe, WellKnownEnvironmentVariables.KreClr, Constants.KreDefaultClr, logger);
+            UpdateToDefaultIfNotSet(exe, WellKnownEnvironmentVariables.KreBitness, KreBitness, logger);
+            UpdateToDefaultIfNotSet(exe, WellKnownEnvironmentVariables.KreNugetApiUrl, Constants.KreDefaultNugetApiUrl, logger);
+            UpdateToDefaultIfNotSet(exe, WellKnownEnvironmentVariables.KvmPath, KvmPath, logger);
 
             bool isInPlace = false;
             string project = _deploymentSettings.GetValue(SettingsKeys.Project);
@@ -87,20 +92,9 @@ namespace Kudu.Core.Deployment.Generator
                 _environment.ScriptPath
             };
 
-            string nodeExePath = PathUtility.ResolveNodePath();
-            if (!String.IsNullOrEmpty(nodeExePath))
-            {
-                // If IIS node path is available prepend it to the path list so that it's discovered before any other node versions in the path.
-                toolsPaths.Add(Path.GetDirectoryName(nodeExePath));
-            }
-
-            string npmExePath = PathUtility.ResolveNpmCmdPath();
-            if (!String.IsNullOrEmpty(npmExePath))
-            {
-                toolsPaths.Add(Path.GetDirectoryName(npmExePath));
-            }
+            toolsPaths.AddRange(PathUtility.ResolveNodeNpmPaths());
             
-            toolsPaths.Add(PathUtility.ResolveNpmGlobalPath());
+            toolsPaths.Add(PathUtility.ResolveNpmGlobalPrefix());
 
             exe.PrependToPath(toolsPaths);
             return exe;
@@ -131,6 +125,14 @@ namespace Kudu.Core.Deployment.Generator
             }
         }
 
+        private string SelectPythonVersionCommand
+        {
+            get
+            {
+                return "python " + QuotePath(Path.Combine(_environment.ScriptPath, "select_python_version.py"));
+            }
+        }
+
         private static string WebJobsDeployCommand
         {
             get { return "deploy_webjobs.cmd"; }
@@ -141,6 +143,27 @@ namespace Kudu.Core.Deployment.Generator
             get
             {
                 return Path.Combine(_environment.ScriptPath, StarterScriptName);
+            }
+        }
+
+        private string KvmPath
+        {
+            get
+            {
+                return Path.Combine(_environment.ScriptPath, "kvm.ps1");
+            }
+        }
+
+        private static string KreBitness
+        {
+            get
+            {
+                var bitness = System.Environment.GetEnvironmentVariable(WellKnownEnvironmentVariables.SiteBitness);
+                if (bitness == null)
+                {
+                    return System.Environment.Is64BitProcess ? "amd64" : "x86";
+                }
+                return bitness.Equals(Constants.X64Bit, StringComparison.OrdinalIgnoreCase) ? "amd64" : "x86";
             }
         }
 

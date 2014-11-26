@@ -3,9 +3,11 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Threading.Tasks;
+using Kudu.Client;
 using Kudu.Contracts.Settings;
 using Kudu.Core;
 using Kudu.Core.Deployment;
+using Kudu.Core.Infrastructure;
 using Kudu.FunctionalTests.Infrastructure;
 using Kudu.TestHarness;
 using Xunit;
@@ -59,10 +61,22 @@ namespace Kudu.FunctionalTests
             PushAndDeployApps("kuduglob", "master", "ASP.NET MVC", HttpStatusCode.OK, "酷度");
         }
 
+        [Fact(Skip="Still needs more work in the deployment script to work")]
+        public void PushAndDeployAspNetAppUnicodeName()
+        {
+            PushAndDeployApps("-benr-", "master", "Hello!", HttpStatusCode.OK, "");
+        }
+
         [Fact]
         public void PushAndDeployAspNetAppAppWithPostBuildEvent()
         {
             PushAndDeployApps("AppWithPostBuildEvent", "master", "Hello Kudu", HttpStatusCode.OK, "Deployment successful");
+        }
+
+        [Fact]
+        public void PushAndDeployFSharpWebApplication()
+        {
+            PushAndDeployApps("fsharp-owin-sample", "master", "Owin Sample with F#", HttpStatusCode.OK, "");
         }
 
         // Node apps
@@ -93,7 +107,7 @@ namespace Kudu.FunctionalTests
         // Other apps
 
         [Fact]
-        public void CustomDeploymentScriptShouldHaveDeploymentSetting()
+        public async Task CustomDeploymentScriptShouldHaveDeploymentSetting()
         {
             // use a fresh guid so its impossible to accidently see the right output just by chance.
             var guidtext = Guid.NewGuid().ToString();
@@ -105,7 +119,7 @@ namespace Kudu.FunctionalTests
             var expectedLogFeedback = "Using custom deployment setting for {0} custom value is '{1}'.".FormatCurrentCulture(kuduSetVar, kuduSetVarText);
 
             string randomTestName = "CustomDeploymentScriptShouldHaveDeploymentSetting";
-            ApplicationManager.Run(randomTestName, appManager =>
+            await ApplicationManager.RunAsync(randomTestName, async appManager =>
             {
                 appManager.SettingsManager.SetValue(normalVar, normalVarText).Wait();
                 appManager.SettingsManager.SetValue(kuduSetVar, kuduSetVarText).Wait();
@@ -128,6 +142,83 @@ namespace Kudu.FunctionalTests
                     kuduSetVar + "=" + kuduSetVarText,
                     expectedLogFeedback };
                 KuduAssert.VerifyLogOutput(appManager, results[0].Id, expectedStrings);
+
+                var ex = await ExceptionAssert.ThrowsAsync<HttpUnsuccessfulRequestException>(() => appManager.DeploymentManager.GetDeploymentScriptAsync());
+                Assert.Equal(HttpStatusCode.NotFound, ex.ResponseMessage.StatusCode);
+                Assert.Contains("Operation only supported if not using a custom deployment script", ex.ResponseMessage.ExceptionMessage);
+            });
+        }
+
+        [Fact]
+        public async Task PushHelloKuduAutoSwapSecondPushShouldFail()
+        {
+            const string randomTestName = "PushHelloKuduAutoSwapSecondPushShouldFail";
+            await ApplicationManager.RunAsync(randomTestName, async appManager =>
+            {
+                await appManager.SettingsManager.SetValue("WEBSITE_SWAP_SLOTNAME", "someslot");
+
+                // Act
+                using (TestRepository testRepository = Git.Clone("HelloKudu"))
+                {
+                    appManager.GitDeploy(testRepository.PhysicalPath);
+                    var results = appManager.DeploymentManager.GetResultsAsync().Result.ToList();
+
+                    // Assert
+                    Assert.Equal(1, results.Count);
+                    Assert.Equal(DeployStatus.Success, results[0].Status);
+
+                    testRepository.WriteFile("somefile.txt", String.Empty);
+                    Git.Commit(testRepository.PhysicalPath, "some commit");
+
+                    // TODO: Add this assert when auto swap is enabled for git push
+                    // var ex = Assert.Throws<CommandLineException>(() => appManager.GitDeploy(testRepository.PhysicalPath, retries: 1));
+                    // Assert.Contains("HTTP code = 409", ex.Error);
+
+                    // Currently this succeeds as auto swap will not occur on git push
+                    appManager.GitDeploy(testRepository.PhysicalPath);
+                }
+            });
+        }
+
+        [Fact]
+        public async Task PushHelloKuduWithCorruptedGitTests()
+        {
+            const string randomTestName = "PushHelloKuduWithCorruptedGitTests";
+            await ApplicationManager.RunAsync(randomTestName, async appManager =>
+            {
+                // Act
+                using (TestRepository testRepository = Git.Clone("HelloKudu"))
+                {
+                    appManager.GitDeploy(testRepository.PhysicalPath);
+                    var results = await appManager.DeploymentManager.GetResultsAsync();
+
+                    // Assert
+                    Assert.Equal(1, results.Count());
+                    Assert.Equal(DeployStatus.Success, results.ElementAt(0).Status);
+
+                    var content = await appManager.VfsManager.ReadAllTextAsync("site/repository/.git/HEAD");
+                    Assert.Equal("ref: refs/heads/master", content.Trim());
+
+                    // Corrupt the .git/HEAD file
+                    appManager.VfsManager.WriteAllBytes("site/repository/.git/HEAD", new byte[23]);
+                    content = await appManager.VfsManager.ReadAllTextAsync("site/repository/.git/HEAD");
+                    Assert.Equal('\0', content[0]);
+
+                    testRepository.WriteFile("somefile.txt", String.Empty);
+                    Git.Commit(testRepository.PhysicalPath, "some commit");
+
+                    var result = appManager.GitDeploy(testRepository.PhysicalPath);
+
+                    content = await appManager.VfsManager.ReadAllTextAsync("site/repository/.git/HEAD");
+                    Assert.Equal("ref: refs/heads/master", content.Trim());
+
+                    results = await appManager.DeploymentManager.GetResultsAsync();
+
+                    // Assert
+                    Assert.Equal(2, results.Count());
+                    Assert.Equal(DeployStatus.Success, results.ElementAt(0).Status);
+                    Assert.Equal(DeployStatus.Success, results.ElementAt(1).Status);
+                }
             });
         }
 
@@ -209,6 +300,18 @@ namespace Kudu.FunctionalTests
         public void PushAndDeployPreviewMvc5()
         {
             PushAndDeployApps("PreviewMvc5", "master", "ASP.NET Preview MVC5 App", HttpStatusCode.OK, "Deployment successful");
+        }
+
+        [Fact]
+        public void PushAndDeployAspNet5WithSln()
+        {
+            PushAndDeployApps("AspNet5With2ProjectsAndSlnFile", "master", "Welcome from ClassLibrary", HttpStatusCode.OK, "Deployment successful");
+        }
+
+        [Fact]
+        public void PushAndDeployAspNet5NoSln()
+        {
+            PushAndDeployApps("AspNet5With2ProjectsNoSlnFile", "master", "Welcome from ClassLibrary", HttpStatusCode.OK, "Deployment successful");
         }
 
         //Common code

@@ -3,6 +3,7 @@ using System.IO;
 using System.IO.Abstractions;
 using System.IO.Compression;
 using Kudu.Contracts.Tracing;
+using Kudu.Core.Tracing;
 
 namespace Kudu.Core.Infrastructure
 {
@@ -79,6 +80,15 @@ namespace Kudu.Core.Infrastructure
             finally
             {
                 fileStream.Dispose();
+            }
+        }
+
+        public static void AddFile(this ZipArchive zip, string fileName, string fileContent)
+        {
+            ZipArchiveEntry entry = zip.CreateEntry(fileName, CompressionLevel.Fastest);
+            using (var writer = new StreamWriter(entry.Open()))
+            {
+                writer.Write(fileContent);
             }
         }
 

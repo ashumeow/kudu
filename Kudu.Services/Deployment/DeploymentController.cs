@@ -11,8 +11,12 @@ using System.Web.Http;
 using Kudu.Contracts.Infrastructure;
 using Kudu.Contracts.SourceControl;
 using Kudu.Contracts.Tracing;
+using Kudu.Core;
 using Kudu.Core.Deployment;
+using Kudu.Core.Infrastructure;
+using Kudu.Core.Settings;
 using Kudu.Core.SourceControl;
+using Kudu.Core.Tracing;
 using Kudu.Services.Infrastructure;
 using Newtonsoft.Json.Linq;
 
@@ -25,18 +29,21 @@ namespace Kudu.Services.Deployment
         private readonly ITracer _tracer;
         private readonly IOperationLock _deploymentLock;
         private readonly IRepositoryFactory _repositoryFactory;
+        private readonly IAutoSwapHandler _autoSwapHandler;
 
         public DeploymentController(ITracer tracer,
                                     IDeploymentManager deploymentManager,
                                     IDeploymentStatusManager status,
                                     IOperationLock deploymentLock,
-                                    IRepositoryFactory repositoryFactory)
+                                    IRepositoryFactory repositoryFactory,
+                                    IAutoSwapHandler autoSwapHandler)
         {
             _tracer = tracer;
             _deploymentManager = deploymentManager;
             _status = status;
             _deploymentLock = deploymentLock;
             _repositoryFactory = repositoryFactory;
+            _autoSwapHandler = autoSwapHandler;
         }
 
         /// <summary>
@@ -82,11 +89,20 @@ namespace Kudu.Services.Deployment
                 {
                     try
                     {
+                        if (_autoSwapHandler.IsAutoSwapOngoing())
+                        {
+                            throw new HttpResponseException(Request.CreateErrorResponse(HttpStatusCode.Conflict, Resources.Error_AutoSwapDeploymentOngoing));
+                        }
+
                         bool clean = false;
+                        bool needFileUpdate = true;
 
                         if (result != null)
                         {
                             clean = result.Value<bool>("clean");
+                            JToken needFileUpdateToken;
+                            if (result.TryGetValue("needFileUpdate", out needFileUpdateToken))
+                                needFileUpdate = needFileUpdateToken.Value<bool>();
                         }
 
                         string username = null;
@@ -108,7 +124,9 @@ namespace Kudu.Services.Deployment
                             }
                         }
 
-                        await _deploymentManager.DeployAsync(repository, changeSet, username, clean);
+                        await _deploymentManager.DeployAsync(repository, changeSet, username, clean, needFileUpdate);
+
+                        _autoSwapHandler.HandleAutoSwap(verifyActiveDeploymentIdChanged: false);
                     }
                     catch (FileNotFoundException ex)
                     {
@@ -226,6 +244,41 @@ namespace Kudu.Services.Deployment
             }
         }
 
+        /// <summary>
+        /// Get the list of all deployments
+        /// </summary>
+        /// <returns></returns>
+        [HttpGet]
+        public HttpResponseMessage GetDeploymentScript()
+        {
+            using (_tracer.Step("DeploymentService.GetDeploymentScript"))
+            {
+                if (!_deploymentManager.GetResults().Any())
+                {
+                    throw new HttpResponseException(Request.CreateErrorResponse(HttpStatusCode.NotFound, "Need to deploy website to get deployment script."));
+                }
+
+                string deploymentScriptContent = _deploymentManager.GetDeploymentScriptContent();
+
+                if (deploymentScriptContent == null)
+                {
+                    throw new HttpResponseException(Request.CreateErrorResponse(HttpStatusCode.NotFound, "Operation only supported if not using a custom deployment script"));
+                }
+
+                HttpResponseMessage response = Request.CreateResponse();
+                response.Content = ZipStreamContent.Create("deploymentscript.zip", _tracer, zip =>
+                {
+                    // Add deploy.cmd to zip file
+                    zip.AddFile(DeploymentManager.DeploymentScriptFileName, deploymentScriptContent);
+
+                    // Add .deployment to cmd file
+                    zip.AddFile(DeploymentSettingsProvider.DeployConfigFile, "[config]\ncommand = {0}\n".FormatInvariant(DeploymentManager.DeploymentScriptFileName));
+                });
+
+                return response;
+            }
+        }
+
         private EntityTagHeaderValue GetCurrentEtag(HttpRequestMessage request)
         {
             return new EntityTagHeaderValue(String.Format("\"{0:x}\"", request.RequestUri.PathAndQuery.GetHashCode() ^ _status.LastModifiedTime.Ticks));
@@ -256,7 +309,7 @@ namespace Kudu.Services.Deployment
             catch
             {
                 // We're going to return null here since we don't want to force a breaking change
-                // on the client side. If the incoming request isn't application/json, we want this 
+                // on the client side. If the incoming request isn't application/json, we want this
                 // to return null.
                 return null;
             }

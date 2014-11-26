@@ -19,6 +19,8 @@ namespace Kudu.Core.Deployment
 {
     public class DeploymentManager : IDeploymentManager
     {
+        public const string DeploymentScriptFileName = "deploy.cmd";
+
         private static readonly Random _random = new Random();
 
         private readonly ISiteBuilderFactory _builderFactory;
@@ -313,8 +315,6 @@ namespace Kudu.Core.Deployment
             catch (Exception ex)
             {
                 // tolerate purge error
-                var tracer = _traceFactory.GetTracer();
-                tracer.TraceError(ex);
                 _analytics.UnexpectedException(ex);
             }
 
@@ -597,6 +597,8 @@ namespace Kudu.Core.Deployment
                     }
                 }
 
+                PreDeployment(tracer);
+
                 using (tracer.Step("Building"))
                 {
                     try
@@ -628,6 +630,25 @@ namespace Kudu.Core.Deployment
             {
                 // Clean the temp folder up
                 CleanBuild(tracer, buildTempPath);
+            }
+        }
+
+        private void PreDeployment(ITracer tracer)
+        {
+            if (Environment.IsAzureEnvironment() && FileSystemHelpers.DirectoryExists(_environment.SSHKeyPath))
+            {
+                string src = Path.GetFullPath(_environment.SSHKeyPath);
+                string dst = Path.GetFullPath(Path.Combine(System.Environment.GetEnvironmentVariable("USERPROFILE"), Constants.SSHKeyPath));
+
+                if (!String.Equals(src, dst, StringComparison.OrdinalIgnoreCase))
+                {
+                    // copy %HOME%\.ssh to %USERPROFILE%\.ssh key to workaround 
+                    // npm with private ssh git dependency
+                    using (tracer.Step("Copying SSH keys"))
+                    {
+                        FileSystemHelpers.CopyDirectoryRecursive(src, dst, overwrite: true);
+                    }
+                }
             }
         }
 
@@ -775,6 +796,27 @@ namespace Kudu.Core.Deployment
             return new ProgressLogger(id, _status, new CascadeLogger(xmlLogger, _globalLogger));
         }
 
+        /// <summary>
+        /// Prepare a directory with the deployment script and .deployment file.
+        /// </summary>
+        /// <returns>The directory path for the files or null if no deployment script exists.</returns>
+        public string GetDeploymentScriptContent()
+        {
+            var cachedDeploymentScriptPath = GetCachedDeploymentScriptPath(_environment);
+
+            if (!FileSystemHelpers.FileExists(cachedDeploymentScriptPath))
+            {
+                return null;
+            }
+
+            return FileSystemHelpers.ReadAllText(cachedDeploymentScriptPath);
+        }
+
+        public static string GetCachedDeploymentScriptPath(IEnvironment environment)
+        {
+            return Path.GetFullPath(Path.Combine(environment.DeploymentToolsPath, DeploymentScriptFileName));
+        }
+
         private string GetActiveDeploymentManifestPath()
         {
             string id = _status.ActiveDeploymentId;
@@ -824,7 +866,7 @@ namespace Kudu.Core.Deployment
             public DeploymentAnalytics(IAnalytics analytics, IDeploymentSettingsManager settings)
             {
                 _analytics = analytics;
-                _siteMode = settings.GetWebSitePolicy();
+                _siteMode = settings.GetWebSiteSku();
             }
 
             public string ProjectType { get; set; }

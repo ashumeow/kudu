@@ -3,15 +3,16 @@ var Utilities = (function () {
     }
     Utilities.toRow = function (name, value) {
         var div = document.createElement("div");
-        div.className = "erow col-s-12";
+        div.className = "row erow col-s-12";
 
         var namediv = document.createElement("div");
-        namediv.className = "col-xs-5";
+        namediv.className = "col-xs-4";
         var strong = document.createElement("strong");
         strong.textContent = name ? name.toString() : "NaN";
         namediv.appendChild(strong);
 
         var valuediv = document.createElement("div");
+        valuediv.className = "col-xs-8";
         valuediv.textContent = typeof (value) !== "undefined" ? value.toString() : "NaN";
 
         div.appendChild(namediv);
@@ -36,7 +37,7 @@ var Utilities = (function () {
                     $(this).dialog("close");
                 }
             }
-        }).css("min-width", 600);
+        }).css("min-width", 600).css("max-width", 1000);
     };
 
     Utilities.makeArrayTable = function (id, headers, objects, attachedData) {
@@ -82,6 +83,14 @@ var Utilities = (function () {
         return array;
     };
 
+    Utilities.getArrayFromJsonObject = function (jsonObject, action) {
+        var array = [];
+        for (var propertyName in jsonObject) {
+            array.push(action(propertyName, jsonObject[propertyName]));
+        }
+        return array;
+    };
+
     Utilities.createDiv = function (id) {
         var div = document.createElement("div");
         div.id = id;
@@ -104,7 +113,7 @@ var Utilities = (function () {
         for (var i = 0; i < tabsHeaders.length; i++) {
             var tab = document.createElement("li");
             var anchor = document.createElement("a");
-            anchor.setAttribute("href", "#" + baseId + "-" + tabsHeaders[i].toLowerCase() + "-tab");
+            anchor.setAttribute("href", "#" + baseId + "-" + tabsHeaders[i].toLowerCase().replace(" ", "-") + "-tab");
             anchor.textContent = tabsHeaders[i];
             tab.appendChild(anchor);
             ul.appendChild(tab);
@@ -203,6 +212,10 @@ var Process = (function () {
         this._json.open_file_handles = Utilities.getArrayFromJson(json.open_file_handles, function (h) {
             return new Handle(h);
         });
+
+        this._json.environment_variables = Utilities.getArrayFromJsonObject(json.environment_variables, function (key, value) {
+            return new EnvironmentVariable(key, value);
+        });
     }
     Object.defineProperty(Process.prototype, "Id", {
         get: function () {
@@ -228,7 +241,7 @@ var Process = (function () {
         configurable: true
     });
 
-    Object.defineProperty(Process.prototype, "Minidumb", {
+    Object.defineProperty(Process.prototype, "Minidump", {
         get: function () {
             return this._json.minidump;
         },
@@ -285,6 +298,18 @@ var Process = (function () {
         configurable: true
     });
 
+    Object.defineProperty(Process.prototype, "UserName", {
+        get: function () {
+            if (!this._json.user_name) {
+                return "  ?";
+            }
+            var parts = this._json.user_name.split("\\");
+            return parts[1];
+        },
+        enumerable: true,
+        configurable: true
+    });
+
     Process.prototype.tableRow = function (level) {
         var _this = this;
         var tr = document.createElement('tr');
@@ -293,13 +318,20 @@ var Process = (function () {
 
         var td = document.createElement('td');
         td.style.paddingLeft = (level === 0 ? 5 : level * 30) + 'px';
+        var suffix = "";
+        if (this._json.is_webjob) {
+            suffix = " <span class='label label-info'>webjob</span>";
+        } else if (this._json.is_scm_site) {
+            suffix = " <span class='label label-primary'>scm</span>";
+        }
         if (this._json.children.length > 0) {
-            $(td).wrapInner('<span class="toggle"></span>    ' + this.FullName);
+            $(td).wrapInner('<span class="toggle"></span>    ' + this.FullName + suffix);
         } else {
-            td.textContent = this.FullName;
+            $(td).wrapInner(this.FullName + suffix);
         }
         tr.appendChild(td);
         tr.appendChild(Utilities.ToTd(this._json.id));
+        tr.appendChild(Utilities.ToTd(this.UserName));
         tr.appendChild(Utilities.ToTd(this.TotalCpuTime));
         tr.appendChild(Utilities.ToTd(Utilities.commaSeparateNumber(this._json.working_set / 1024) + " KB"));
         tr.appendChild(Utilities.ToTd(Utilities.commaSeparateNumber(this._json.private_memory / 1024) + " KB"));
@@ -327,6 +359,7 @@ var Process = (function () {
         this.getModulesTab().appendTo(div);
         this.getOpenHandlesTab().appendTo(div);
         this.getThreadsTab().appendTo(div);
+        this.getEnvironmentVariablesTab().appendTo(div);
 
         return Utilities.makeDialog($(div).tabs(), 800);
     };
@@ -364,6 +397,11 @@ var Process = (function () {
         div.appendChild(Utilities.toRow("id", this._json.id));
         div.appendChild(Utilities.toRow("name", this._json.name));
         div.appendChild(Utilities.toRow("file name", this._json.file_name));
+        div.appendChild(Utilities.toRow("command line", this._json.command_line));
+        div.appendChild(Utilities.toRow("description", this._json.description ? this._json.description : ""));
+        div.appendChild(Utilities.toRow("user name", this._json.user_name));
+        div.appendChild(Utilities.toRow("is scm site", this._json.is_scm_site));
+        div.appendChild(Utilities.toRow("is webjob", this._json.is_scm_site));
         div.appendChild(Utilities.toRow("handle count", Utilities.commaSeparateNumber(this._json.handle_count)));
         div.appendChild(Utilities.toRow("module countid", Utilities.commaSeparateNumber(this._json.module_count)));
         div.appendChild(Utilities.toRow("thread count", Utilities.commaSeparateNumber(this._json.thread_count)));
@@ -417,8 +455,17 @@ var Process = (function () {
         return $(div).hide();
     };
 
+    Process.prototype.getEnvironmentVariablesTab = function () {
+        var _this = this;
+        var div = Utilities.createDiv(this._json.id.toString() + "-environment-variables-tab");
+
+        var table = Utilities.makeArrayTable(div.id + "-table", ["Key", "Value"], this._json.environment_variables);
+        div.appendChild(table);
+        return $(div).hide();
+    };
+
     Process.prototype.getProcessDatailsTabsHeaders = function () {
-        return Utilities.createTabs(this._json.id.toString(), ["General", "Modules", "Handles", "Threads"]);
+        return Utilities.createTabs(this._json.id.toString(), ["General", "Modules", "Handles", "Threads", "Environment Variables"]);
     };
 
     Process.prototype.kill = function () {
@@ -567,6 +614,25 @@ var Handle = (function () {
     return Handle;
 })();
 
+var EnvironmentVariable = (function () {
+    function EnvironmentVariable(key, value) {
+        this.key = key;
+        this.value = value;
+    }
+    EnvironmentVariable.prototype.dialog = function () {
+        throw "Not Implemented";
+    };
+
+    EnvironmentVariable.prototype.tableCells = function () {
+        return [this.key, this.value];
+    };
+
+    EnvironmentVariable.prototype.updateSelf = function () {
+        throw "Not Implemented";
+    };
+    return EnvironmentVariable;
+})();
+
 var Tree = (function () {
     function Tree() {
         this.roots = [];
@@ -676,12 +742,15 @@ function processExplorerSetupAsync() {
     var processTree = new Tree();
     nodeList = [];
     var deferred = [];
-    $.getJSON("/diagnostics/processes", function (data) {
+    $.getJSON(appRoot + "api/processes", function (data) {
+        var ids = $.map(data, function (item, index) {
+            return item.id;
+        });
         for (var i = 0; i < data.length; i++) {
             deferred.push($.getJSON(data[i].href, function (response) {
                 var p = new Process(response);
                 var processNode = new ProcessNode(p);
-                if (p.ParentId === -1) {
+                if (p.ParentId === -1 || $.inArray(p.ParentId, ids) < 0) {
                     processTree.roots.push(processNode);
                 }
                 nodeList.push(new ProcessNode(p));

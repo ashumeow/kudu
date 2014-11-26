@@ -14,7 +14,6 @@ namespace Kudu
         public const string SSHKeyLockFile = "sshkey.lock";
         public const string HooksLockFile = "hooks.lock";
         public const string SSHKeyPath = ".ssh";
-        public const string TraceLockFile = "trace.lock";
         public const string NpmDebugLogFile = "npm-debug.log";
 
         public const string DeploymentCachePath = "deployments";
@@ -22,11 +21,10 @@ namespace Kudu
         public const string SiteFolder = @"site";
         public const string LogFilesPath = @"LogFiles";
         public const string ApplicationLogFilesDirectory = "Application";
-        public const string TracePath = LogFilesPath + @"\Git\trace";
+        public const string TracePath = LogFilesPath + @"\kudu\trace";
         public const string SiteExtensionLogsDirectory = "siteExtLogs";
         public const string DeploySettingsPath = "settings.xml";
         public const string ActiveDeploymentFile = "active";
-        public const string TraceFile = "trace.xml";
         public const string ScriptsPath = "scripts";
         public const string NodeModulesPath = "node_modules";
         public const string FirstDeploymentManifestFileName = "firstDeploymentManifest";
@@ -41,15 +39,23 @@ namespace Kudu
         public const string DummyRazorExtension = ".kudu777";
 
         // Kudu trace text file related
-        public const string DeploymentTracePath = LogFilesPath + @"\Git\deployment";
+        public const string DeploymentTracePath = LogFilesPath + @"\kudu\deployment";
 
         public const string TraceFileFormat = "{0}-{1}.txt";
         public const string TraceFileEnvKey = "KUDU_TRACE_FILE";
 
         public const string DiagnosticsPath = @"diagnostics";
+        public const string LocksPath = @"locks";
         public const string SettingsJsonFile = @"settings.json";
 
         public const string HostingStartHtml = "hostingstart.html";
+
+        public const string KreDefaultVersion = "1.0.0-beta1";
+        public const string KreDefaultClr = "CLR";
+        public const string KreDefaultNugetApiUrl = "https://www.myget.org/F/aspnetmaster/api/v2";
+
+        public const string X64Bit = "AMD64";
+        public const string X86Bit = "x86";
 
         private static readonly TimeSpan _maxAllowedExectionTime = TimeSpan.FromMinutes(30);
 

@@ -12,11 +12,13 @@ using System.Text;
 using System.Threading.Tasks;
 using Kudu.Common;
 using Kudu.Contracts.Infrastructure;
+using Kudu.Contracts.SourceControl;
 using Kudu.Contracts.Tracing;
 using Kudu.Core;
 using Kudu.Core.Deployment;
 using Kudu.Core.Infrastructure;
 using Kudu.Core.SourceControl;
+using Kudu.Core.Tracing;
 using Kudu.Services.Infrastructure;
 
 namespace Kudu.Services.SourceControl
@@ -45,12 +47,13 @@ namespace Kudu.Services.SourceControl
                                        IDeploymentManager deploymentManager,
                                        IOperationLock operationLock,
                                        IEnvironment environment,
-                                       IRepository repository)
+                                       IRepository repository,
+                                       IRepositoryFactory repositoryFactory)
             : base(tracer, environment, environment.RepositoryPath)
         {
             _deploymentManager = deploymentManager;
             _operationLock = operationLock;
-            _repository = repository;
+            _repository = repository ?? repositoryFactory.GetRepository();
         }
 
         public override async Task<HttpResponseMessage> GetItem()

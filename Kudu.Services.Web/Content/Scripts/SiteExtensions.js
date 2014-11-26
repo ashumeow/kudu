@@ -14,7 +14,18 @@
         $("#successNotification").slideDown();
     }
 
-    function displayError(message) {
+    function displayError(message, jqXhr) {
+        if (jqXhr.responseJSON) {
+            if (jqXhr.responseJSON.Message) {
+                message += " - " + jqXhr.responseJSON.Message;
+            }
+            if (jqXhr.responseJSON.ExceptionType) {
+                message += " - " + jqXhr.responseJSON.ExceptionType;
+            }
+            if (jqXhr.responseJSON.ExceptionMessage) {
+                message += " - " + jqXhr.responseJSON.ExceptionMessage;
+            }
+        }
         $("#errorNotificationText").html(message);
         $("#errorNotification").slideDown();
     }
@@ -48,14 +59,17 @@
     $('#tabHeadings a[href="' + window.location.hash + '"]').tab('show');
 
     function processExtensions(ext) {
-        if (!ext.icon_url) {
-            ext.icon_url = "../Content/Images/Windows Azure Web Site.png";
-        }
         if (ext.download_count < 0) {
             ext.download_count = null;
         }
         if (!ext.title) {
             ext.title = ext.id;
+        }
+        if (!ext.authors) {
+            ext.authors = "";
+        }
+        if (!ext.description) {
+            ext.description = "";
         }
         if (ext.extension_url) {
             ext.primaryAction = ko.observable('Launch');
@@ -107,7 +121,9 @@
         data.primaryAction('Wait');
         $.ajax({
             type: "PUT",
-            url: "/api/siteextensions/" + data.id,
+            url: appRoot + "api/siteextensions/" + data.id,
+            contentType: 'application/json',
+            data: JSON.stringify({feed_url: data.feed_url}),
             success: function (result) {
                 result = processExtensions(result);
                 context.$root.addInstalled(result);
@@ -119,7 +135,8 @@
                 }, 5000);
             },
             error: function (jqXhr, textStatus, errorThrown) {
-                displayError("Failed to install <strong>" + data.title + "</strong>: " + textStatus + " - " + errorThrown);
+                displayError("Failed to install <strong>" + data.title + "</strong>", jqXhr);
+                data.primaryAction('Install');
             },
             complete: function () {
                 // no op
@@ -145,11 +162,14 @@
         $(btn).prop("disabled", "disabled");
         $.ajax({
             type: "PUT",
-            url: "/api/siteextensions/" + data.id,
+            url: appRoot + "api/siteextensions/" + data.id,
+            contentType: 'application/json',
+            data: JSON.stringify({ feed_url: data.feed_url }),
             success: function (result) {
             },
             error: function (jqXhr, textStatus, errorThrown) {
-                displayError("Failed to update <strong>" + result.title + "</strong>: " + textStatus + " - " + errorThrown);
+                displayError("Failed to update <strong>" + data.title + "</strong>", jqXhr);
+                data.primaryAction('Install');
             },
             complete: function () {
                 context.$root.populateAllTabs();
@@ -161,7 +181,7 @@
         buttonResponse(this, function (completionCallback) {
             $.ajax({
                 type: "DELETE",
-                url: "/diagnostics/processes/0",
+                url: appRoot + "api/processes/0",
                 error: function () {
                     // no op
                 },
@@ -188,19 +208,20 @@
 
         self.populateGallery = function (filter, completionCallback) {
             self.loadingGallery(true);
+            
             $.ajax({
                 type: "GET",
-                url: "/api/extensionfeed?" + $.param({ "filter": filter }),
+                url: appRoot + "api/extensionfeed?" + $.param({ "filter": filter }),
                 dataType: "json",
                 success: function (data) {
                     data.forEach(processExtensions);
                     self.gallery(data);
                     if ($("#gallery").hasClass("active")) {
-                        self.display(data);
+                        self.display(self.gallery());
                     }
                 },
                 error: function (jqXhr, textStatus, errorThrown) {
-                    displayError(textStatus + ": " + errorThrown);
+                    displayError("Failed to retrieve site extensions from Gallery", jqXhr);
                 },
                 complete: function () {
                     self.loadingGallery(false);
@@ -213,19 +234,20 @@
 
         self.populateInstalled = function (filter, completionCallback) {
             self.loadingInstalled(true);
+
             $.ajax({
                 type: "GET",
-                url: "/api/siteextensions?" + $.param({ "filter": filter }),
+                url: appRoot + "api/siteextensions?" + $.param({ "filter": filter }),
                 dataType: "json",
                 success: function (data) {
                     data.forEach(processExtensions);
                     self.installed(data);
                     if ($("#installed").hasClass("active")) {
-                        self.display(data);
+                        self.display(self.installed());
                     }
                 },
                 error: function (jqXhr, textStatus, errorThrown) {
-                    displayError(textStatus + ": " + errorThrown);
+                    displayError("Failed to retrieve installed site extensions", jqXhr);
                 },
                 complete: function () {
                     self.loadingInstalled(false);
@@ -252,10 +274,10 @@
         self.remove = function (extension, completionCallback, successCallback) {
             $.ajax({
                 type: "DELETE",
-                url: "/api/siteextensions/" + extension.id,
+                url: appRoot + "api/siteextensions/" + extension.id,
                 success: successCallback,
                 error: function (jqXhr, textStatus, errorThrown) {
-                    displayError(textStatus + ": " + errorThrown);
+                    displayError("Failed to remove <strong>" + extension.title + "</strong>", jqXhr);
                 },
                 complete: function () {
                     self.populateAllTabs(completionCallback);

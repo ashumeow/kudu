@@ -4,6 +4,7 @@ using System.IO;
 using System.IO.Abstractions;
 using System.Net;
 using System.Net.Http;
+using System.Security.Principal;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -26,14 +27,22 @@ namespace Kudu.Core.Test
             var path = @"x:\temp\minidump.dmp";
             var fileSystem = new Mock<IFileSystem>();
             var file = new Mock<FileBase>();
+            var fileInfoFactory = new Mock<IFileInfoFactory>();
+            var fileInfo = new Mock<FileInfoBase>();
 
             // Setup
             fileSystem.SetupGet(fs => fs.File)
                       .Returns(file.Object);
+            fileSystem.SetupGet(fs => fs.FileInfo)
+                      .Returns(fileInfoFactory.Object);
             file.Setup(f => f.Exists(path))
                       .Returns(true);
             file.Setup(f => f.OpenRead(path))
                       .Returns(() => new MemoryStream());
+            fileInfoFactory.Setup(f => f.FromFileName(path))
+                           .Returns(() => fileInfo.Object);
+            fileInfo.Setup(f => f.Exists)
+                    .Returns(true);
             FileSystemHelpers.Instance = fileSystem.Object;
 
             // Test
@@ -42,7 +51,7 @@ namespace Kudu.Core.Test
             }
 
             // Assert
-            file.Verify(f => f.Delete(path), Times.Once());
+            fileInfo.Verify(f => f.Delete(), Times.Once());
         }
 
         [Fact]
@@ -52,14 +61,22 @@ namespace Kudu.Core.Test
             var path = @"x:\temp\minidump.dmp";
             var fileSystem = new Mock<IFileSystem>();
             var file = new Mock<FileBase>();
+            var fileInfoFactory = new Mock<IFileInfoFactory>();
+            var fileInfo = new Mock<FileInfoBase>();
 
             // Setup
             fileSystem.SetupGet(fs => fs.File)
                       .Returns(file.Object);
+            fileSystem.SetupGet(fs => fs.FileInfo)
+                      .Returns(fileInfoFactory.Object);
             file.Setup(f => f.Exists(path))
                       .Returns(true);
             file.Setup(f => f.OpenRead(path))
                       .Returns(() => new MemoryStream());
+            fileInfoFactory.Setup(f => f.FromFileName(path))
+                           .Returns(() => fileInfo.Object);
+            fileInfo.Setup(f => f.Exists)
+                    .Returns(true);
             FileSystemHelpers.Instance = fileSystem.Object;
 
             // Test
@@ -67,7 +84,7 @@ namespace Kudu.Core.Test
             stream.Close();
 
             // Assert
-            file.Verify(f => f.Delete(path), Times.Once());
+            fileInfo.Verify(f => f.Delete(), Times.Once());
         }
 
         [Fact]
@@ -78,10 +95,8 @@ namespace Kudu.Core.Test
 
             // Setup
             controller.Object.Request = new HttpRequestMessage();
-            settings.Setup(s => s.GetValue(SettingsKeys.WebSiteComputeMode, It.IsAny<bool>()))
-                    .Returns("Shared");
-            settings.Setup(s => s.GetValue(SettingsKeys.WebSiteSiteMode, It.IsAny<bool>()))
-                    .Returns("Limited");
+            settings.Setup(s => s.GetValue(SettingsKeys.WebSiteSku, It.IsAny<bool>()))
+                    .Returns("Free");
 
             // Test
             var response = controller.Object.MiniDump(0, 2);
@@ -90,7 +105,7 @@ namespace Kudu.Core.Test
             Assert.Equal(HttpStatusCode.InternalServerError, response.StatusCode);
 
             var error = response.Content.ReadAsAsync<JObject>().Result;
-            Assert.Equal("Site mode (Shared|Limited) does not support full minidump.", error.Value<string>("Message"));
+            Assert.Equal("Site sku (Free) does not support full minidump.", error.Value<string>("Message"));
         }
 
         [Fact]
@@ -221,6 +236,18 @@ namespace Kudu.Core.Test
             {
                 ProcessExtensions.StandardOutputDrainTimeout = timeout;
             }
+        }
+
+        [Fact]
+        public void GetProcessUserNameTests()
+        {
+            var identity = WindowsIdentity.GetCurrent();
+            var process = Process.GetCurrentProcess();
+
+            var userName = process.GetUserName();
+
+            // Assert
+            Assert.Equal(userName, identity.Name);
         }
     }
 }

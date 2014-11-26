@@ -4,7 +4,6 @@ using System.IO;
 using System.Threading;
 using Kudu.Contracts.Jobs;
 using Kudu.Contracts.Settings;
-using Kudu.Contracts.Tracing;
 using Kudu.Core.Infrastructure;
 using Kudu.Core.Tracing;
 
@@ -21,7 +20,6 @@ namespace Kudu.Core.Jobs
         private int _started = 0;
         private Thread _continuousJobThread;
         private ContinuousJobLogger _continuousJobLogger;
-        private JobSettings _jobSettings;
         private readonly string _disableFilePath;
 
         public ContinuousJobRunner(ContinuousJob continuousJob, IEnvironment environment, IDeploymentSettingsManager settings, ITraceFactory traceFactory, IAnalytics analytics)
@@ -88,8 +86,11 @@ namespace Kudu.Core.Jobs
 
                         _continuousJobLogger.StartingNewRun();
 
-                        InitializeJobInstance(continuousJob, _continuousJobLogger);
-                        RunJobInstance(continuousJob, _continuousJobLogger, String.Empty);
+                        using (new Timer(LogStillRunning, null, TimeSpan.FromHours(1), TimeSpan.FromHours(12)))
+                        {
+                            InitializeJobInstance(continuousJob, _continuousJobLogger);
+                            RunJobInstance(continuousJob, _continuousJobLogger, String.Empty);
+                        }
 
                         if (_started == 1 && !IsDisabled)
                         {
@@ -100,7 +101,14 @@ namespace Kudu.Core.Jobs
                             _continuousJobLogger.ReportStatus(ContinuousJobStatus.PendingRestart);
                             WaitForTimeOrStop(webJobsRestartTime);
                         }
+
+                        // Make sure lock is released before re-iterating and trying to get the lock again
+                        ReleaseSingletonLock();
                     }
+                }
+                catch (ThreadAbortException)
+                {
+                    TraceFactory.GetTracer().TraceWarning("Thread was aborted, make sure WebJob was about to stop.");
                 }
                 catch (Exception ex)
                 {
@@ -115,9 +123,21 @@ namespace Kudu.Core.Jobs
             _continuousJobThread.Start();
         }
 
+        private void LogStillRunning(object state)
+        {
+            try
+            {
+                _continuousJobLogger.LogInformation("WebJob is still running");
+            }
+            catch
+            {
+                // Ignore as this is a best effort call
+            }
+        }
+
         private bool TryGetLockIfSingleton()
         {
-            bool isSingleton = _jobSettings.IsSingleton;
+            bool isSingleton = JobSettings.IsSingleton;
             if (!isSingleton)
             {
                 return true;
@@ -128,37 +148,51 @@ namespace Kudu.Core.Jobs
                 return true;
             }
 
-            _continuousJobLogger.ReportStatus(ContinuousJobStatus.InactiveInstance);
+            UpdateStatusIfChanged(ContinuousJobStatus.InactiveInstance);
+
             return false;
         }
 
-        public void StopJob()
+        public void StopJob(bool isShutdown = false)
         {
             Interlocked.Exchange(ref _started, 0);
 
-            _continuousJobLogger.ReportStatus(ContinuousJobStatus.Stopping);
-
-            NotifyShutdownJob();
+            bool logStopped = false;
 
             if (_continuousJobThread != null)
             {
+                logStopped = true;
+
+                if (isShutdown)
+                {
+                    _continuousJobLogger.LogInformation("WebJob is stopping due to website shutting down");
+                }
+
+                _continuousJobLogger.ReportStatus(ContinuousJobStatus.Stopping);
+
+                NotifyShutdownJob();
+
                 // By default give the continuous job 5 seconds before killing it (after notifying the continuous job)
-                if (!_continuousJobThread.Join(_jobSettings.GetStoppingWaitTime(DefaultContinuousJobStoppingWaitTimeInSeconds)))
+                if (!_continuousJobThread.Join(JobSettings.GetStoppingWaitTime(DefaultContinuousJobStoppingWaitTimeInSeconds)))
                 {
                     _continuousJobThread.Abort();
                 }
 
                 _continuousJobThread = null;
-                _continuousJobLogger.ReportStatus(ContinuousJobStatus.Stopped);
             }
 
             SafeKillAllRunningJobInstances(_continuousJobLogger);
+
+            if (logStopped)
+            {
+                UpdateStatusIfChanged(ContinuousJobStatus.Stopped);
+            }
         }
 
         public void RefreshJob(ContinuousJob continuousJob, JobSettings jobSettings)
         {
             StopJob();
-            _jobSettings = jobSettings;
+            JobSettings = jobSettings;
             StartJob(continuousJob);
         }
 

@@ -13,6 +13,10 @@
             padding-top: 60px;
         }
     </style>
+    <script type="text/javascript">
+        appRoot = "@System.Web.VirtualPathUtility.ToAbsolute("~/")";
+    </script>
+
 </head>
 
 <body>
@@ -25,7 +29,7 @@
                     <span class="icon-bar"></span>
                     <span class="icon-bar"></span>
                 </button>
-                <a class="navbar-brand" href="/">Kudu</a>
+                <a class="navbar-brand" href="~/">Kudu</a>
             </div>
             <div class="collapse navbar-collapse">
                 <ul class="nav navbar-nav">
@@ -33,8 +37,8 @@
                     <li class="dropdown">
                         <a href="#" data-toggle="dropdown" class="dropdown-toggle">Debug console <b class="caret"></b></a>
                         <ul class="dropdown-menu">
-                            <li><a href="/DebugConsole">CMD</a></li>
-                            <li><a href="/DebugConsole/?shell=powershell">PowerShell</a></li>
+                            <li><a href="~/DebugConsole">CMD</a></li>
+                            <li><a href="~/DebugConsole/?shell=powershell">PowerShell</a></li>
                         </ul>
                     </li>
                     <li><a href="~/ProcessExplorer/">Process explorer</a></li>
@@ -44,22 +48,32 @@
                             <li><a href="~/api/dump">Diagnostic dump</a></li>
                             <li><a href="~/api/logstream" title="If no log events are being generated the page may not load.">Log stream</a></li>
                             <li><a href="~/WebHooks">Web hooks</a></li>
+                            <li><a href="~/api/deploymentscript">Download deployment script</a></li>
+                            <li><a href="~/Support">Support</a></li>
                         </ul>
                     </li>
                     <li><a href="~/SiteExtensions/">Site extensions</a></li>
                 </ul>
                 @{
-                    string email = Request.Headers["X-MS-CLIENT-PRINCIPAL-NAME"];
+                    var email = Request.Headers["X-MS-CLIENT-PRINCIPAL-NAME"];
+                    var displayName = Request.Headers["X-MS-CLIENT-DISPLAY-NAME"] ?? email;
                     if (email != null && email.Contains("@"))
                     {
-                        <ul class="nav navbar-nav navbar-right">
-                            <li class="dropdown">
-                                <a href="#" data-toggle="dropdown">@email</a>
-                                <ul class="dropdown-menu">
-                                    <li><a href="/logout">Logout</a></li>
-                                </ul>
-                            </li>
-                        </ul>
+                        using (var md5 = System.Security.Cryptography.MD5.Create())
+                        {
+                            var hash = md5.ComputeHash(System.Text.Encoding.UTF8.GetBytes(email.ToLowerInvariant().Trim()));
+                            var imageUrl = String.Format("https://secure.gravatar.com/avatar/{0}.jpg?d=mm",
+                                BitConverter.ToString(hash).ToLowerInvariant().Replace("-", String.Empty));
+                            <ul class="nav navbar-nav navbar-right">
+                                <li class="dropdown">
+                                        <img src="@imageUrl" style="height: 50px; padding-top: 1px"/>
+                                        <a href="#" data-toggle="dropdown" style="display: inline">@displayName</a>
+                                    <ul class="dropdown-menu">
+                                        <li><a href="/logout">Logout</a></li>
+                                    </ul>
+                                </li>
+                            </ul>
+                        }
                     }
                 }
             </div>
@@ -68,4 +82,5 @@
 
     @RenderBody()
 </body>
+
 </html>
